@@ -8,9 +8,9 @@ JSON line on stdin, never in argv.
 
 Commands:
   status                       connection, team and token state
-  connect                      stdin {"org", "project", "token"}; verifies and saves
+  connect                      stdin {"org", "token"}; verifies, saves, lists teams
   disconnect                   forget the token and connection
-  teams                        teams in the project
+  teams                        teams in every project the token can see
   set-team <team-id>           choose the team whose sprint is shown
   board [--iteration ID] [--cached]
                                stories and their tasks for a sprint
@@ -267,14 +267,16 @@ def http_message(code, detail):
     return detail or "Azure DevOps error %d" % code
 
 
-def client_from_config(cfg=None):
+def client_from_config(cfg=None, need_project=True):
     cfg = cfg or load_config()
-    if not cfg.get("org") or not cfg.get("project"):
+    if not cfg.get("org"):
         raise Failure("Not connected")
+    if need_project and not cfg.get("project"):
+        raise Failure("Choose a team")
     token = token_lookup(cfg["org"])
     if not token:
         raise Failure("No token saved for %s" % cfg["org"])
-    return Client(cfg["org"], cfg["project"], token)
+    return Client(cfg["org"], cfg.get("project", ""), token)
 
 
 # ---- HTML <-> editable text -----------------------------------------------------
@@ -519,90 +521,86 @@ def cmd_status(args):
     cfg = load_config()
     if cfg.get("demo"):
         return {"connected": True, "demo": True, "org": "https://dev.azure.com/demo", "project": "Demo",
-                "team": {"id": "demo", "name": "Phoenix Team"}, "user": DEMO_ME}
-    connected = bool(cfg.get("org") and cfg.get("project"))
-    has_token = bool(connected and token_lookup(cfg["org"]))
+                "team": {"id": "demo", "name": "Phoenix Team", "project": "Demo"}, "user": DEMO_ME}
+    has_token = bool(cfg.get("org") and token_lookup(cfg["org"]))
+    team = cfg.get("team") if cfg.get("project") else None
     return {
-        "connected": connected and has_token,
+        "connected": has_token,
         "org": cfg.get("org", ""),
-        "project": cfg.get("project", ""),
-        "team": cfg.get("team") or None,
+        "project": cfg.get("project", "") if team else "",
+        "team": team or None,
         "user": cfg.get("user") or None,
         "hasToken": has_token,
     }
 
 
-def list_teams(client):
-    data = client.get("/_apis/projects/%s/teams" % urllib.parse.quote(client.project, safe=""),
-                      {"$top": "500"}, project=False)
-    teams = [{"id": t["id"], "name": t["name"]} for t in data.get("value", [])]
-    return sorted(teams, key=lambda t: t["name"].lower())
-
-
-def project_for_team(client, name):
-    wanted = name.strip().lower()
-    projects = client.get("/_apis/projects", {"$top": "500"}, project=False).get("value", [])
-    for p in projects:
-        if p.get("name", "").lower() == wanted:
-            return client.get("/_apis/projects/%s" % p["id"], project=False), None
+def all_teams(client):
+    """Every team the token can see, across all projects."""
     try:
-        teams = client.get("/_apis/teams", {"api-version": "7.1-preview.3", "$top": "1000"}, project=False).get("value", [])
+        data = client.get("/_apis/teams", {"api-version": "7.1-preview.3", "$top": "1000"}, project=False)
+        teams = [{"id": t["id"], "name": t["name"], "projectId": t.get("projectId", ""),
+                  "project": t.get("projectName", "")} for t in data.get("value", [])]
     except Failure:
+        # Fall back to walking the projects one at a time.
         teams = []
-    for t in teams:
-        if t.get("name", "").lower() == wanted:
-            proj = client.get("/_apis/projects/%s" % t["projectId"], project=False)
-            return proj, {"id": t["id"], "name": t["name"]}
-    names = ", ".join(sorted(p.get("name", "") for p in projects)[:8])
-    raise Failure("No project or team called \"%s\". Projects in this organization: %s" % (name, names or "none visible to this token"))
+        projects = client.get("/_apis/projects", {"$top": "500"}, project=False).get("value", [])
+        for proj in projects:
+            data = client.get("/_apis/projects/%s/teams" % proj["id"], {"$top": "500"}, project=False)
+            teams += [{"id": t["id"], "name": t["name"], "projectId": proj["id"], "project": proj["name"]}
+                      for t in data.get("value", [])]
+    if any(not t["project"] for t in teams):
+        projects = client.get("/_apis/projects", {"$top": "500"}, project=False).get("value", [])
+        names = {p["id"]: p["name"] for p in projects}
+        for t in teams:
+            t["project"] = t["project"] or names.get(t["projectId"], "")
+        teams = [t for t in teams if t["project"]]
+    return sorted(teams, key=lambda t: (t["name"].lower(), t["project"].lower()))
 
 
 def cmd_connect(args):
     data = read_stdin_json()
-    org, project = normalize_org(data.get("org"), data.get("project"))
-    if not project:
-        raise Failure("Enter the project name")
+    org, project_hint = normalize_org(data.get("org"), "")
     cfg = load_config()
     token = (data.get("token") or "").strip()
     if not token and cfg.get("org") == org:
         token = token_lookup(org)
     if not token:
         raise Failure("Paste a personal access token")
-    client = Client(org, project, token)
+    client = Client(org, "", token)
     conn = client.get("/_apis/connectionData", {"api-version": "7.1-preview"}, project=False)
     user = conn.get("authenticatedUser") or {}
     props = user.get("properties") or {}
     account = (props.get("Account") or {}).get("$value") or ""
     me = {"name": user.get("providerDisplayName") or "", "email": account}
-    team = None
-    try:
-        proj = client.get("/_apis/projects/%s" % urllib.parse.quote(project, safe=""), project=False)
-    except Failure:
-        # Maybe a team name was given: find the project that owns it.
-        proj, team = project_for_team(client, project)
-    client.project = proj.get("name") or project
-    teams = list_teams(client)
+    teams = all_teams(client)
+    if not teams:
+        raise Failure("The token works, but it can't see any teams. Give it the Project and Team (Read) scope.")
     token_store(org, token)
-    if not team and cfg.get("org") == org and cfg.get("project") == client.project:
-        team = cfg.get("team")
-    if not team and proj.get("defaultTeam"):
-        team = {"id": proj["defaultTeam"]["id"], "name": proj["defaultTeam"]["name"]}
-    save_config({"org": org, "project": client.project, "team": team, "user": me})
-    return {"ok": True, "org": org, "project": client.project, "user": me, "team": team, "teams": teams}
+
+    # Keep the team chosen before if it's still visible; a lone team is chosen for you.
+    team = None
+    if cfg.get("org") == org and cfg.get("team"):
+        team = next((t for t in teams if t["id"] == cfg["team"].get("id")), None)
+    if not team and len(teams) == 1:
+        team = teams[0]
+    save_config({"org": org, "project": team["project"] if team else "", "team": team, "user": me})
+    return {"ok": True, "org": org, "project": team["project"] if team else "", "user": me, "team": team,
+            "teams": teams, "projectHint": project_hint}
 
 
 def cmd_disconnect(args):
     cfg = load_config()
     if cfg.get("org"):
         token_clear(cfg["org"])
-    save_config({"org": cfg.get("org", ""), "project": cfg.get("project", "")})
+    save_config({"org": cfg.get("org", "")})
     return {"ok": True}
 
 
 def cmd_teams(args):
-    if load_config().get("demo"):
+    cfg = load_config()
+    if cfg.get("demo"):
         return {"teams": DEMO_TEAMS}
-    return {"teams": list_teams(client_from_config())}
+    return {"teams": all_teams(client_from_config(cfg, need_project=False))}
 
 
 def cmd_set_team(args):
@@ -611,13 +609,14 @@ def cmd_set_team(args):
     cfg = load_config()
     if cfg.get("demo"):
         return {"ok": True}
-    teams = list_teams(client_from_config(cfg))
-    match = next((t for t in teams if t["id"] == args[0] or t["name"] == args[0]), None)
+    teams = all_teams(client_from_config(cfg, need_project=False))
+    match = next((t for t in teams if t["id"] == args[0]), None)
     if not match:
-        raise Failure("No team %s in %s" % (args[0], cfg.get("project")))
+        raise Failure("That team is no longer visible to your token")
     cfg["team"] = match
+    cfg["project"] = match["project"]
     save_config(cfg)
-    return {"ok": True, "team": match}
+    return {"ok": True, "team": match, "project": match["project"]}
 
 
 def iterations(client, team):
@@ -963,7 +962,8 @@ def cmd_demo(args):
 # ---- demo data ----------------------------------------------------------------------
 
 DEMO_ME = {"name": "Jonathan Buckland", "email": "jonathan@example.com"}
-DEMO_TEAMS = [{"id": "demo", "name": "Phoenix Team"}, {"id": "demo2", "name": "Platform Team"}]
+DEMO_TEAMS = [{"id": "demo", "name": "Phoenix Team", "project": "Demo"},
+              {"id": "demo2", "name": "Platform Team", "project": "Demo"}]
 DEMO_PEOPLE = [DEMO_ME, {"name": "Priya Shah", "email": "priya@example.com"},
                {"name": "Tom Okafor", "email": "tom@example.com"}]
 DEMO_STATES = {

@@ -42,12 +42,13 @@ Bind a key in `~/.config/hypr/bindings.lua`:
 o.bind("SUPER + SHIFT + PERIOD", "DevOps board", "omarchy-shell shell toggle funcoder.devops-board '{}'")
 ```
 
-On first open, enter your organization (a URL like
-`https://dev.azure.com/contoso`, or paste any board URL and the project is
-filled in), the project, and a personal access token with **Work Items (Read &
-write)** and **Project and Team (Read)**. The token is kept in the desktop
-keyring (`secret-tool`); `AZURE_DEVOPS_EXT_PAT` is used when the keyring has
-none. "Try with demo data" shows a sample sprint without connecting.
+On first open, step 1 asks for access: your organization (a URL like
+`https://dev.azure.com/contoso`, or paste any Azure DevOps URL) and a personal
+access token with **Work Items (Read & write)** and **Project and Team
+(Read)**. The token is kept in the desktop keyring (`secret-tool`);
+`AZURE_DEVOPS_EXT_PAT` is used when the keyring has none. Step 2 lists every
+team the token can see, with its project; pick yours (Ctrl+T switches later).
+"Try with demo data" shows a sample sprint without connecting.
 
 Re-run `./deploy-local.sh` after editing. If QML changes don't show up, run
 `omarchy restart shell`.
@@ -56,7 +57,7 @@ Re-run `./deploy-local.sh` after editing. If QML changes don't show up, run
 
 | Path | Contents |
 |---|---|
-| `~/.config/funcoder-devops-board/config.json` | organization, project, team, you |
+| `~/.config/funcoder-devops-board/config.json` | organization, chosen team and its project, you |
 | `~/.cache/funcoder-devops-board/` | last board per sprint (opens instantly), states, fields, team members |
 
 ## Command line

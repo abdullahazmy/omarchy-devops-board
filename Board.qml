@@ -196,7 +196,7 @@ Item {
     expanded = ({})
     if (data.teams && data.teams.length > 0) teams = data.teams
     if (!data.team) {
-      showTeams()
+      showTeams(true)
     } else {
       view = "board"
       refreshBoard()
@@ -209,12 +209,14 @@ Item {
     focusKeys()
   }
 
-  function showTeams() {
+  // Team picker; loaded = true reuses the list connect just returned.
+  function showTeams(loaded) {
     view = "teams"
     teamFilter = ""
     teamIndex = 0
     teamsError = ""
     focusKeys()
+    if (loaded === true && teams.length > 0) return
     teamsLoading = true
     run(["teams"], null, function(data) {
       teamsLoading = false
@@ -231,7 +233,10 @@ Item {
 
   function filteredTeams() {
     var needle = teamFilter.toLowerCase()
-    return teams.filter(function(t) { return needle === "" || t.name.toLowerCase().indexOf(needle) !== -1 })
+    return teams.filter(function(t) {
+      return needle === "" || t.name.toLowerCase().indexOf(needle) !== -1
+        || String(t.project || "").toLowerCase().indexOf(needle) !== -1
+    })
   }
 
   function pickTeam(team) {
@@ -243,7 +248,7 @@ Item {
         teamsError = data.error
         return
       }
-      if (status) status = Object.assign({}, status, { team: team })
+      if (status) status = Object.assign({}, status, { team: team, project: data.project || team.project || "" })
       board = null
       iterationId = ""
       expanded = ({})
@@ -710,7 +715,7 @@ Item {
             if (event.key === Qt.Key_Escape) {
               if (root.teamFilter !== "") root.teamFilter = ""
               else if (root.board || (root.status && root.status.team)) { root.view = "board"; root.focusKeys() }
-              else root.dismiss()
+              else root.showSetup()
             } else if (Util.editsFilter(event, root.teamFilter)) {
               root.teamFilter = Util.editedFilter(event, root.teamFilter)
               root.teamIndex = 0
@@ -816,7 +821,7 @@ Item {
                   width: parent.width
                   textFormat: Text.PlainText
                   text: root.view === "teams"
-                    ? "Choose a team"
+                    ? "Choose your team"
                     : (root.board ? root.board.team.name : (root.status && root.status.team ? root.status.team.name : "Sprint board"))
                   color: root.foreground
                   font.family: root.fontFamily
@@ -829,8 +834,11 @@ Item {
                   width: parent.width
                   textFormat: Text.PlainText
                   text: {
-                    if (root.view === "teams")
-                      return ((root.status ? root.status.project : "") + " · " + root.teams.length + " teams").toUpperCase()
+                    if (root.view === "teams") {
+                      var first = !(root.status && root.status.team)
+                      var org = root.status && root.status.org ? root.status.org.replace(/^https?:\/\//, "") : ""
+                      return ((first ? "Step 2 of 2  ·  " : "") + org + "  ·  " + root.teams.length + (root.teams.length === 1 ? " team" : " teams")).toUpperCase()
+                    }
                     if (!root.board) return (root.status ? root.status.project : "").toUpperCase()
                     var it = root.board.iteration
                     var parts = [root.board.project, it.name]
@@ -1016,7 +1024,7 @@ Item {
               width: parent.width
               textFormat: Text.PlainText
               text: root.view === "teams"
-                ? (root.teamFilter || "Type to find a team…")
+                ? (root.teamFilter || "Type to find a team or project…")
                 : (root.filterText || "Type to filter by title, id, person, state or tag…")
               color: root.foreground
               opacity: (root.view === "teams" ? root.teamFilter : root.filterText) ? 1 : 0.45
@@ -1088,14 +1096,28 @@ Item {
                   Text {
                     anchors.left: parent.left
                     anchors.leftMargin: Style.spacing.rowPaddingX
-                    anchors.right: parent.right
-                    anchors.rightMargin: Style.spacing.rowPaddingX
+                    anchors.right: teamProject.left
+                    anchors.rightMargin: Style.spacing.xl
                     anchors.verticalCenter: parent.verticalCenter
                     textFormat: Text.PlainText
                     text: parent.modelData.name + (parent.isCurrent ? "   ·  current" : "")
                     color: root.foreground
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.body
+                    elide: Text.ElideRight
+                  }
+
+                  Text {
+                    id: teamProject
+                    anchors.right: parent.right
+                    anchors.rightMargin: Style.spacing.rowPaddingX
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: Math.min(implicitWidth, teamList.width * 0.4)
+                    textFormat: Text.PlainText
+                    text: parent.modelData.project || ""
+                    color: root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
                     elide: Text.ElideRight
                   }
 
@@ -1129,7 +1151,7 @@ Item {
               width: parent.width
               textFormat: Text.PlainText
               text: root.view === "teams"
-                ? "↑↓ select  ·  Enter choose  ·  Ctrl+, connection  ·  Esc back"
+                ? "Type to filter  ·  ↑↓ select  ·  Enter choose  ·  Ctrl+, connection  ·  Esc back"
                 : "↑↓ move  ·  →← expand  ·  Enter open  ·  Tab all/mine  ·  Ctrl+←→ sprint  ·  Ctrl+T team  ·  Ctrl+O browser  ·  Ctrl+, connection  ·  Esc close"
               color: root.foreground
               opacity: 0.5

@@ -2,8 +2,9 @@ import QtQuick
 import qs.Commons
 import qs.Ui
 
-// Connection form: organization, project and a personal access token. The
-// token goes to devops.py over stdin and is kept in the desktop keyring.
+// Connection form, step one: organization and a personal access token. The
+// token goes to devops.py over stdin and is kept in the desktop keyring; the
+// team (and with it the project) is picked on the next screen.
 Item {
   id: root
 
@@ -18,11 +19,9 @@ Item {
   function focusDefault() {
     if (app && app.status && !demo) {
       if (orgField.text === "" && app.status.org) orgField.text = app.status.org
-      if (projectField.text === "" && app.status.project) projectField.text = app.status.project
     }
     tokenField.text = ""
     if (orgField.text === "") orgField.forceActiveFocus()
-    else if (projectField.text === "") projectField.forceActiveFocus()
     else tokenField.forceActiveFocus()
   }
 
@@ -30,7 +29,7 @@ Item {
     if (busy) return
     errorText = ""
     busy = true
-    app.run(["connect"], { org: orgField.text, project: projectField.text, token: tokenField.text }, function(data) {
+    app.run(["connect"], { org: orgField.text, token: tokenField.text }, function(data) {
       busy = false
       tokenField.text = ""
       if (data.error) {
@@ -67,9 +66,11 @@ Item {
 
   Keys.onPressed: function(event) {
     if (event.key === Qt.Key_Escape) {
-      if (app.status && app.status.connected) {
-        app.view = app.board ? "board" : "loading"
+      if (app.board) {
+        app.view = "board"
         app.focusKeys()
+      } else if (app.status && app.status.connected) {
+        app.loadStatus()
       } else {
         app.dismiss()
       }
@@ -109,7 +110,7 @@ Item {
 
         Text {
           textFormat: Text.PlainText
-          text: (root.reconnecting ? "Connection" : "Connect your organization").toUpperCase()
+          text: (root.reconnecting ? "Connection" : "Step 1 of 2  ·  Access").toUpperCase()
           color: app.dim
           font.family: app.fontFamily
           font.pixelSize: Style.font.caption
@@ -130,24 +131,7 @@ Item {
       TextField {
         id: orgField
         width: parent.width
-        placeholderText: "https://dev.azure.com/your-org, or paste any board URL"
-        foreground: app.foreground
-        enabled: !root.busy
-        onAccepted: projectField.text === "" ? projectField.forceActiveFocus() : tokenField.forceActiveFocus()
-        KeyNavigation.tab: projectField
-      }
-    }
-
-    Column {
-      width: parent.width
-      spacing: Style.spacing.labelGap
-
-      PanelSectionHeader { text: "PROJECT"; foreground: app.foreground; fontFamily: app.fontFamily }
-
-      TextField {
-        id: projectField
-        width: parent.width
-        placeholderText: "Project name (filled in from a pasted board URL)"
+        placeholderText: "https://dev.azure.com/your-org, or paste any Azure DevOps URL"
         foreground: app.foreground
         enabled: !root.busy
         onAccepted: tokenField.forceActiveFocus()
@@ -176,7 +160,7 @@ Item {
         width: parent.width
         textFormat: Text.PlainText
         wrapMode: Text.WordWrap
-        text: "Create one under User settings → Personal access tokens with the scopes Work Items (Read & write) and Project and Team (Read). It is stored in your keyring."
+        text: "Create one under User settings → Personal access tokens with the scopes Work Items (Read & write) and Project and Team (Read). It is stored in your keyring. You pick your team next."
         color: app.dim
         font.family: app.fontFamily
         font.pixelSize: Style.font.caption
@@ -230,7 +214,7 @@ Item {
         id: connectButton
         anchors.right: parent.right
         anchors.verticalCenter: parent.verticalCenter
-        text: root.busy ? "Connecting…" : (root.reconnecting ? "Save" : "Connect")
+        text: root.busy ? "Checking access…" : (root.reconnecting ? "Save" : "Connect")
         fontSize: Style.font.bodySmall
         foreground: app.foreground
         fontFamily: app.fontFamily
