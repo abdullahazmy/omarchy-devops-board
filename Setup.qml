@@ -16,7 +16,6 @@ Item {
   readonly property bool reconnecting: !!(app && app.status && app.status.connected) && !demo
 
   function focusDefault() {
-    errorText = ""
     if (app && app.status && !demo) {
       if (orgField.text === "" && app.status.org) orgField.text = app.status.org
       if (projectField.text === "" && app.status.project) projectField.text = app.status.project

@@ -229,7 +229,12 @@ class Client:
                 raw = resp.read()
                 ctype = resp.headers.get("Content-Type", "")
         except urllib.error.HTTPError as exc:
-            raise Failure(http_message(exc))
+            detail = error_detail(exc)
+            # Some resources are still in preview and refuse a released
+            # api-version; ask again with "-preview" appended.
+            if exc.code == 400 and "-preview" in detail and "api-version=" in url and "-preview" not in url:
+                return self.request(method, re.sub(r"(api-version=[0-9.]+)", r"\1-preview", url), body, content_type)
+            raise Failure(http_message(exc.code, detail))
         except urllib.error.URLError as exc:
             raise Failure("Can't reach %s (%s)" % (urllib.parse.urlparse(url).netloc, exc.reason))
         except TimeoutError:
@@ -243,22 +248,23 @@ class Client:
         return self.request("GET", self.url(path, params, project, team))
 
 
-def http_message(exc):
-    detail = ""
+def error_detail(exc):
     try:
-        body = json.loads(exc.read().decode("utf-8"))
-        detail = body.get("message") or ""
+        return json.loads(exc.read().decode("utf-8")).get("message") or ""
     except Exception:
-        pass
-    if exc.code in (401, 203):
+        return ""
+
+
+def http_message(code, detail):
+    if code in (401, 203):
         return "Token rejected: it may have expired or belong to another organization"
-    if exc.code == 403:
+    if code == 403:
         return detail or "The token lacks permission (needs Work Items: Read & write, Project and Team: Read)"
-    if exc.code == 404:
+    if code == 404:
         return detail or "Not found"
-    if exc.code == 412 or "TF26071" in detail or "rev" in detail.lower() and exc.code == 400:
+    if code == 412 or "TF26071" in detail or ("rev" in detail.lower() and code == 400):
         return "Someone else changed this item since you opened it. Reload to see their changes."
-    return detail or "Azure DevOps error %d" % exc.code
+    return detail or "Azure DevOps error %d" % code
 
 
 def client_from_config(cfg=None):
@@ -533,6 +539,24 @@ def list_teams(client):
     return sorted(teams, key=lambda t: t["name"].lower())
 
 
+def project_for_team(client, name):
+    wanted = name.strip().lower()
+    projects = client.get("/_apis/projects", {"$top": "500"}, project=False).get("value", [])
+    for p in projects:
+        if p.get("name", "").lower() == wanted:
+            return client.get("/_apis/projects/%s" % p["id"], project=False), None
+    try:
+        teams = client.get("/_apis/teams", {"api-version": "7.1-preview.3", "$top": "1000"}, project=False).get("value", [])
+    except Failure:
+        teams = []
+    for t in teams:
+        if t.get("name", "").lower() == wanted:
+            proj = client.get("/_apis/projects/%s" % t["projectId"], project=False)
+            return proj, {"id": t["id"], "name": t["name"]}
+    names = ", ".join(sorted(p.get("name", "") for p in projects)[:8])
+    raise Failure("No project or team called \"%s\". Projects in this organization: %s" % (name, names or "none visible to this token"))
+
+
 def cmd_connect(args):
     data = read_stdin_json()
     org, project = normalize_org(data.get("org"), data.get("project"))
@@ -545,16 +569,22 @@ def cmd_connect(args):
     if not token:
         raise Failure("Paste a personal access token")
     client = Client(org, project, token)
-    conn = client.get("/_apis/connectionData", project=False)
+    conn = client.get("/_apis/connectionData", {"api-version": "7.1-preview"}, project=False)
     user = conn.get("authenticatedUser") or {}
     props = user.get("properties") or {}
     account = (props.get("Account") or {}).get("$value") or ""
     me = {"name": user.get("providerDisplayName") or "", "email": account}
-    proj = client.get("/_apis/projects/%s" % urllib.parse.quote(project, safe=""), project=False)
+    team = None
+    try:
+        proj = client.get("/_apis/projects/%s" % urllib.parse.quote(project, safe=""), project=False)
+    except Failure:
+        # Maybe a team name was given: find the project that owns it.
+        proj, team = project_for_team(client, project)
     client.project = proj.get("name") or project
     teams = list_teams(client)
     token_store(org, token)
-    team = cfg.get("team") if cfg.get("org") == org and cfg.get("project") == client.project else None
+    if not team and cfg.get("org") == org and cfg.get("project") == client.project:
+        team = cfg.get("team")
     if not team and proj.get("defaultTeam"):
         team = {"id": proj["defaultTeam"]["id"], "name": proj["defaultTeam"]["name"]}
     save_config({"org": org, "project": client.project, "team": team, "user": me})
@@ -643,7 +673,7 @@ def cmd_board(args):
         current = past[-1] if past else its[0]
 
     rels = client.get("/_apis/work/teamsettings/iterations/%s/workitems" % current["id"],
-                      team=team["id"]).get("workItemRelations", [])
+                      {"api-version": "7.1-preview.1"}, team=team["id"]).get("workItemRelations", [])
     parent_of = {}
     ids = []
     for r in rels:
