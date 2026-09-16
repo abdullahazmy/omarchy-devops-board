@@ -71,8 +71,6 @@ Item {
         app.focusKeys()
       } else if (app.status && app.status.connected) {
         app.loadStatus()
-      } else {
-        app.dismiss()
       }
       event.accepted = true
     }
@@ -228,7 +226,7 @@ Item {
     Text {
       width: parent.width
       textFormat: Text.PlainText
-      text: "Enter next field  ·  Tab move  ·  Esc " + (root.reconnecting ? "back" : "close")
+      text: "Enter next field  ·  Tab move" + (root.reconnecting ? "  ·  Esc back" : "")
       color: app.foreground
       opacity: 0.5
       font.family: app.fontFamily

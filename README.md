@@ -1,7 +1,7 @@
 # DevOps Board
 
-An Omarchy shell plugin that shows your Azure DevOps team's sprint as a
-keyboard-driven card: user stories (and bugs) with their tasks nested
+An Omarchy shell plugin that shows your Azure DevOps team's sprint in a
+keyboard-driven window: user stories (and bugs) with their tasks nested
 underneath, how far through the sprint you are, and an editor for any story
 or task.
 
@@ -21,7 +21,7 @@ or task.
 
 | Where | Keys |
 |---|---|
-| Board | type to filter · ↑↓ move · → ← expand / collapse · Enter open · Tab all / mine · Ctrl+← → sprint · Ctrl+T team · Ctrl+R refresh · Ctrl+O open in browser · Ctrl+, connection · Esc clear filter, close |
+| Board | type to filter · ↑↓ move · → ← expand / collapse · Enter open · Tab all / mine · Ctrl+← → sprint · Ctrl+T team · Ctrl+R refresh · Ctrl+H hide closed · Ctrl+O open in browser · Ctrl+, connection · Esc clear filter |
 | Editor | Tab next field · Ctrl+S save · Ctrl+Enter post comment · Ctrl+R reload · Ctrl+O browser · Esc leave field, then back |
 
 Rich text is edited as light markdown: paragraphs, `- ` and `1. ` lists,
@@ -36,10 +36,13 @@ browser), so nothing is lost in the round trip.
 omarchy plugin enable funcoder.devops-board
 ```
 
-Bind a key in `~/.config/hypr/bindings.lua`:
+The board is a normal Hyprland window (title `DevOps Board`): it tiles, moves
+between workspaces and closes with Super+W. Its layout adapts to narrow tiles.
+`summon` opens it, or focuses it if it's already open. Bind a key in
+`~/.config/hypr/bindings.lua`:
 
 ```lua
-o.bind("SUPER + SHIFT + PERIOD", "DevOps board", "omarchy-shell shell toggle funcoder.devops-board '{}'")
+o.bind("SUPER + SHIFT + PERIOD", "DevOps board", "omarchy-shell shell summon funcoder.devops-board '{}'")
 ```
 
 On first open, step 1 asks for access: your organization (a URL like

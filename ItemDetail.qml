@@ -270,7 +270,7 @@ Item {
           : app.glyphStory
         color: root.item ? app.stateColor(root.item.state, root.item.category, app.foreground) : app.foreground
         font.family: app.fontFamily
-        font.pixelSize: Style.font.display
+        font.pixelSize: app.compact ? Style.font.iconLarge : Style.font.display
       }
 
       ColumnLayout {
@@ -309,6 +309,7 @@ Item {
 
       Text {
         Layout.alignment: Qt.AlignVCenter
+        visible: !app.compact
         textFormat: Text.PlainText
         text: root.saving ? "Saving…"
           : root.noticeText !== "" ? root.noticeText
@@ -323,7 +324,7 @@ Item {
       Button {
         Layout.alignment: Qt.AlignVCenter
         iconText: "\uF0C7"
-        text: "Save"
+        text: app.compact ? (root.dirty ? String(root.changeCount) : "") : "Save"
         fontSize: Style.font.bodySmall
         foreground: app.foreground
         fontFamily: app.fontFamily
@@ -364,286 +365,306 @@ Item {
     }
 
     // ---------- body ----------
-    RowLayout {
+    // Side by side when there is room; stacked and scrolling in a narrow window.
+    Flickable {
       Layout.fillWidth: true
       Layout.fillHeight: true
-      spacing: Style.space(18)
       visible: root.item !== null
+      clip: true
+      contentWidth: width
+      contentHeight: app.compact ? bodyGrid.implicitHeight : height
+      interactive: app.compact
+      boundsBehavior: Flickable.StopAtBounds
 
-      // Left: editable fields.
-      ColumnLayout {
-        Layout.fillWidth: true
-        Layout.fillHeight: true
-        Layout.preferredWidth: 62
-        spacing: Style.space(12)
+      GridLayout {
+        id: bodyGrid
+        width: parent.width
+        height: app.compact ? implicitHeight : parent.height
+        columns: app.compact ? 1 : 3
+        columnSpacing: Style.space(18)
+        rowSpacing: Style.space(14)
 
-        GridLayout {
-          Layout.fillWidth: true
-          columns: 4
-          columnSpacing: Style.spacing.xl
-          rowSpacing: Style.spacing.labelGap
-
-          FieldLabel { text: "STATE" }
-          FieldLabel { text: "ASSIGNED TO" }
-          FieldLabel { text: root.item && root.item.pointsField ? root.item.pointsLabel.toUpperCase() : "REMAINING (H)" }
-          FieldLabel { text: "PRIORITY" }
-
-          Dropdown {
-            id: stateDropdown
-            Layout.fillWidth: true
-            Layout.preferredWidth: Style.space(140)
-            showLabel: false
-            options: root.stateOptions()
-            foreground: app.foreground
-            fontFamily: app.fontFamily
-            enabled: !root.saving
-            onChanged: function(v) { root.draftState = v }
-          }
-
-          SearchableDropdown {
-            id: assigneeDropdown
-            Layout.fillWidth: true
-            Layout.preferredWidth: Style.space(260)
-            showLabel: false
-            options: root.assigneeOptions()
-            placeholderText: "Find a person…"
-            foreground: app.foreground
-            fontFamily: app.fontFamily
-            enabled: !root.saving
-            onChanged: function(v) { root.draftAssignee = v }
-          }
-
-          TextField {
-            id: estimateField
-            Layout.fillWidth: true
-            Layout.preferredWidth: Style.space(100)
-            foreground: app.foreground
-            font.family: app.fontFamily
-            enabled: root.item !== null && !root.saving && (root.item.pointsField !== "" || root.item.hasRemaining)
-            placeholderText: root.item && (root.item.pointsField !== "" || root.item.hasRemaining) ? "–" : "n/a"
-            inputMethodHints: Qt.ImhFormattedNumbersOnly
-            onTextEdited: {
-              if (root.item && root.item.pointsField) root.draftPoints = text
-              else root.draftRemaining = text
-            }
-            onAccepted: root.save()
-          }
-
-          TextField {
-            id: priorityField
-            Layout.fillWidth: true
-            Layout.preferredWidth: Style.space(80)
-            foreground: app.foreground
-            font.family: app.fontFamily
-            enabled: root.item !== null && root.item.hasPriority && !root.saving
-            placeholderText: root.item && root.item.hasPriority ? "1–4" : "n/a"
-            inputMethodHints: Qt.ImhDigitsOnly
-            onTextEdited: root.draftPriority = text
-            onAccepted: root.save()
-          }
-        }
-
+        // Left: editable fields.
         ColumnLayout {
           Layout.fillWidth: true
-          spacing: Style.spacing.labelGap
+          Layout.fillHeight: true
+          Layout.preferredWidth: 620
+          spacing: Style.space(12)
 
-          FieldLabel { text: "TAGS" }
-
-          TextField {
-            id: tagsField
+          GridLayout {
             Layout.fillWidth: true
-            foreground: app.foreground
-            font.family: app.fontFamily
-            enabled: root.item !== null && !root.saving
-            placeholderText: "Separate tags with ;"
-            onTextEdited: root.draftTags = text
-            onAccepted: root.save()
-          }
-        }
+            // Label above each control; two columns in a narrow window.
+            flow: GridLayout.TopToBottom
+            rows: app.compact ? 4 : 2
+            columnSpacing: Style.spacing.xl
+            rowSpacing: Style.spacing.labelGap
 
-        RowLayout {
-          Layout.fillWidth: true
-          FieldLabel { text: root.item ? root.item.bodyLabel.toUpperCase() : "DESCRIPTION" }
-          Item { Layout.fillWidth: true }
-          Text {
-            textFormat: Text.PlainText
-            text: root.item && root.item.bodyRich ? "Has images or tables · edit in the browser" : "**bold**  *italic*  - list  [link](url)"
-            color: app.dim
-            font.family: app.fontFamily
-            font.pixelSize: Style.font.caption
-          }
-        }
+            FieldLabel { text: "STATE" }
+            Dropdown {
+              id: stateDropdown
+              Layout.fillWidth: true
+              Layout.preferredWidth: Style.space(140)
+              showLabel: false
+              options: root.stateOptions()
+              foreground: app.foreground
+              fontFamily: app.fontFamily
+              enabled: !root.saving
+              onChanged: function(v) { root.draftState = v }
+            }
 
-        NoteEditor {
-          id: bodyEditor
-          Layout.fillWidth: true
-          Layout.fillHeight: true
-          Layout.minimumHeight: Style.space(80)
-          readOnly: root.item === null || root.item.bodyRich || root.saving
-          foreground: app.foreground
-          fontFamily: app.fontFamily
-          placeholderText: "No " + (root.item ? root.item.bodyLabel.toLowerCase() : "description") + " yet"
-          onEdited: root.draftBody = text
-        }
+            FieldLabel { text: "ASSIGNED TO" }
+            SearchableDropdown {
+              id: assigneeDropdown
+              Layout.fillWidth: true
+              Layout.preferredWidth: Style.space(260)
+              showLabel: false
+              options: root.assigneeOptions()
+              placeholderText: "Find a person…"
+              foreground: app.foreground
+              fontFamily: app.fontFamily
+              enabled: !root.saving
+              onChanged: function(v) { root.draftAssignee = v }
+            }
 
-        FieldLabel {
-          visible: root.item !== null && root.item.hasAcceptance
-          text: "ACCEPTANCE CRITERIA" + (root.item && root.item.acceptanceRich ? "  ·  read-only" : "")
-        }
+            FieldLabel { text: root.item && root.item.pointsField ? root.item.pointsLabel.toUpperCase() : "REMAINING (H)" }
+            TextField {
+              id: estimateField
+              Layout.fillWidth: true
+              Layout.preferredWidth: Style.space(100)
+              foreground: app.foreground
+              font.family: app.fontFamily
+              enabled: root.item !== null && !root.saving && (root.item.pointsField !== "" || root.item.hasRemaining)
+              placeholderText: root.item && (root.item.pointsField !== "" || root.item.hasRemaining) ? "–" : "n/a"
+              inputMethodHints: Qt.ImhFormattedNumbersOnly
+              onTextEdited: {
+                if (root.item && root.item.pointsField) root.draftPoints = text
+                else root.draftRemaining = text
+              }
+              onAccepted: root.save()
+            }
 
-        NoteEditor {
-          id: acceptanceEditor
-          visible: root.item !== null && root.item.hasAcceptance
-          Layout.fillWidth: true
-          Layout.fillHeight: true
-          Layout.minimumHeight: Style.space(70)
-          readOnly: root.item === null || root.item.acceptanceRich || root.saving
-          foreground: app.foreground
-          fontFamily: app.fontFamily
-          placeholderText: "No acceptance criteria yet"
-          onEdited: root.draftAcceptance = text
-        }
-      }
-
-      Rectangle {
-        Layout.fillHeight: true
-        Layout.preferredWidth: Math.max(1, Style.space(1))
-        color: app.border
-        opacity: 0.25
-      }
-
-      // Right: relations and discussion.
-      ColumnLayout {
-        Layout.fillWidth: true
-        Layout.fillHeight: true
-        Layout.preferredWidth: 38
-        spacing: Style.space(10)
-
-        FieldLabel {
-          visible: root.item !== null && root.item.parent !== null
-          text: "PARENT"
-        }
-
-        LinkRow {
-          visible: root.item !== null && root.item.parent !== null
-          Layout.fillWidth: true
-          link: root.item && root.item.parent ? root.item.parent : null
-        }
-
-        FieldLabel {
-          visible: root.item !== null && root.item.children.length > 0
-          text: {
-            if (!root.item) return ""
-            var done = root.item.children.filter(function(c) { return c.category === "done" }).length
-            return (root.item.type === "Task" ? "CHILDREN" : "TASKS") + "  ·  " + done + "/" + root.item.children.length + " DONE"
-          }
-        }
-
-        ListView {
-          id: childList
-          visible: root.item !== null && root.item.children.length > 0
-          Layout.fillWidth: true
-          Layout.preferredHeight: Math.min(contentHeight, app.rowHeight * 5)
-          clip: true
-          spacing: Style.spacing.xxs
-          boundsBehavior: Flickable.StopAtBounds
-          model: root.item ? root.item.children : []
-          delegate: LinkRow {
-            required property var modelData
-            width: childList.width
-            link: modelData
-          }
-        }
-
-        RowLayout {
-          Layout.fillWidth: true
-          FieldLabel { text: "DISCUSSION" + (root.item && root.item.comments.length > 0 ? "  ·  " + root.item.comments.length : "") }
-          Item { Layout.fillWidth: true }
-          Text {
-            textFormat: Text.PlainText
-            text: root.posting ? "Posting…" : "Ctrl+Enter post"
-            color: app.dim
-            font.family: app.fontFamily
-            font.pixelSize: Style.font.caption
-          }
-        }
-
-        NoteEditor {
-          id: commentEditor
-          Layout.fillWidth: true
-          Layout.preferredHeight: Style.space(64)
-          readOnly: root.item === null || root.posting
-          foreground: app.foreground
-          fontFamily: app.fontFamily
-          placeholderText: "Add a comment…"
-          onEdited: root.draftComment = text
-          Keys.priority: Keys.BeforeItem
-          Keys.onPressed: function(event) {
-            if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter) && (event.modifiers & Qt.ControlModifier)) {
-              root.postComment()
-              event.accepted = true
+            FieldLabel { text: "PRIORITY" }
+            TextField {
+              id: priorityField
+              Layout.fillWidth: true
+              Layout.preferredWidth: Style.space(80)
+              foreground: app.foreground
+              font.family: app.fontFamily
+              enabled: root.item !== null && root.item.hasPriority && !root.saving
+              placeholderText: root.item && root.item.hasPriority ? "1–4" : "n/a"
+              inputMethodHints: Qt.ImhDigitsOnly
+              onTextEdited: root.draftPriority = text
+              onAccepted: root.save()
             }
           }
-        }
 
-        ListView {
-          id: commentList
-          Layout.fillWidth: true
-          Layout.fillHeight: true
-          clip: true
-          spacing: Style.space(12)
-          boundsBehavior: Flickable.StopAtBounds
-          model: root.item ? root.item.comments : []
+          ColumnLayout {
+            Layout.fillWidth: true
+            spacing: Style.spacing.labelGap
 
-          delegate: Column {
-            required property var modelData
-            width: commentList.width
-            spacing: Style.spacing.xxs
+            FieldLabel { text: "TAGS" }
 
+            TextField {
+              id: tagsField
+              Layout.fillWidth: true
+              foreground: app.foreground
+              font.family: app.fontFamily
+              enabled: root.item !== null && !root.saving
+              placeholderText: "Separate tags with ;"
+              onTextEdited: root.draftTags = text
+              onAccepted: root.save()
+            }
+          }
+
+          RowLayout {
+            Layout.fillWidth: true
+            FieldLabel { text: root.item ? root.item.bodyLabel.toUpperCase() : "DESCRIPTION" }
+            Item { Layout.fillWidth: true }
             Text {
-              width: parent.width
               textFormat: Text.PlainText
-              text: parent.modelData.author + "  ·  " + root.when(parent.modelData.date)
-              color: app.isMine(app.me ? app.me.email : "") && app.me && parent.modelData.author === app.me.name ? app.selectedText : app.dim
+              text: root.item && root.item.bodyRich ? "Has images or tables · edit in the browser" : "**bold**  *italic*  - list  [link](url)"
+              color: app.dim
               font.family: app.fontFamily
               font.pixelSize: Style.font.caption
-              font.bold: true
-              elide: Text.ElideRight
+            }
+          }
+
+          NoteEditor {
+            id: bodyEditor
+            Layout.fillWidth: true
+            Layout.fillHeight: !app.compact
+            Layout.minimumHeight: Style.space(80)
+            Layout.preferredHeight: app.compact ? Style.space(160) : -1
+            readOnly: root.item === null || root.item.bodyRich || root.saving
+            foreground: app.foreground
+            fontFamily: app.fontFamily
+            placeholderText: "No " + (root.item ? root.item.bodyLabel.toLowerCase() : "description") + " yet"
+            onEdited: root.draftBody = text
+          }
+
+          FieldLabel {
+            visible: root.item !== null && root.item.hasAcceptance
+            text: "ACCEPTANCE CRITERIA" + (root.item && root.item.acceptanceRich ? "  ·  read-only" : "")
+          }
+
+          NoteEditor {
+            id: acceptanceEditor
+            visible: root.item !== null && root.item.hasAcceptance
+            Layout.fillWidth: true
+            Layout.fillHeight: !app.compact
+            Layout.minimumHeight: Style.space(70)
+            Layout.preferredHeight: app.compact ? Style.space(120) : -1
+            readOnly: root.item === null || root.item.acceptanceRich || root.saving
+            foreground: app.foreground
+            fontFamily: app.fontFamily
+            placeholderText: "No acceptance criteria yet"
+            onEdited: root.draftAcceptance = text
+          }
+        }
+
+        Rectangle {
+          visible: !app.compact
+          Layout.fillHeight: true
+          Layout.preferredWidth: Math.max(1, Style.space(1))
+          color: app.border
+          opacity: 0.25
+        }
+
+        // Right: relations and discussion.
+        ColumnLayout {
+          Layout.fillWidth: true
+          Layout.fillHeight: true
+          Layout.preferredWidth: 380
+          spacing: Style.space(10)
+
+          FieldLabel {
+            visible: root.item !== null && root.item.parent !== null
+            text: "PARENT"
+          }
+
+          LinkRow {
+            visible: root.item !== null && root.item.parent !== null
+            Layout.fillWidth: true
+            link: root.item && root.item.parent ? root.item.parent : null
+          }
+
+          FieldLabel {
+            visible: root.item !== null && root.item.children.length > 0
+            text: {
+              if (!root.item) return ""
+              var done = root.item.children.filter(function(c) { return c.category === "done" }).length
+              return (root.item.type === "Task" ? "CHILDREN" : "TASKS") + "  ·  " + done + "/" + root.item.children.length + " DONE"
+            }
+          }
+
+          ListView {
+            id: childList
+            visible: root.item !== null && root.item.children.length > 0
+            Layout.fillWidth: true
+            Layout.preferredHeight: Math.min(contentHeight, app.rowHeight * 5)
+            clip: true
+            spacing: Style.spacing.xxs
+            boundsBehavior: Flickable.StopAtBounds
+            model: root.item ? root.item.children : []
+            delegate: LinkRow {
+              required property var modelData
+              width: childList.width
+              link: modelData
+            }
+          }
+
+          RowLayout {
+            Layout.fillWidth: true
+            FieldLabel { text: "DISCUSSION" + (root.item && root.item.comments.length > 0 ? "  ·  " + root.item.comments.length : "") }
+            Item { Layout.fillWidth: true }
+            Text {
+              textFormat: Text.PlainText
+              text: root.posting ? "Posting…" : "Ctrl+Enter post"
+              color: app.dim
+              font.family: app.fontFamily
+              font.pixelSize: Style.font.caption
+            }
+          }
+
+          NoteEditor {
+            id: commentEditor
+            Layout.fillWidth: true
+            Layout.preferredHeight: Style.space(64)
+            readOnly: root.item === null || root.posting
+            foreground: app.foreground
+            fontFamily: app.fontFamily
+            placeholderText: "Add a comment…"
+            onEdited: root.draftComment = text
+            Keys.priority: Keys.BeforeItem
+            Keys.onPressed: function(event) {
+              if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter) && (event.modifiers & Qt.ControlModifier)) {
+                root.postComment()
+                event.accepted = true
+              }
+            }
+          }
+
+          ListView {
+            id: commentList
+            Layout.fillWidth: true
+            Layout.fillHeight: !app.compact
+            Layout.preferredHeight: app.compact ? Math.max(Style.space(60), contentHeight) : -1
+            interactive: !app.compact
+            clip: true
+            spacing: Style.space(12)
+            boundsBehavior: Flickable.StopAtBounds
+            model: root.item ? root.item.comments : []
+
+            delegate: Column {
+              required property var modelData
+              width: commentList.width
+              spacing: Style.spacing.xxs
+
+              Text {
+                width: parent.width
+                textFormat: Text.PlainText
+                text: parent.modelData.author + "  ·  " + root.when(parent.modelData.date)
+                color: app.isMine(app.me ? app.me.email : "") && app.me && parent.modelData.author === app.me.name ? app.selectedText : app.dim
+                font.family: app.fontFamily
+                font.pixelSize: Style.font.caption
+                font.bold: true
+                elide: Text.ElideRight
+              }
+
+              Text {
+                width: parent.width
+                textFormat: Text.PlainText
+                text: parent.modelData.text
+                color: app.foreground
+                font.family: app.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                wrapMode: Text.Wrap
+              }
             }
 
             Text {
-              width: parent.width
+              anchors.centerIn: parent
+              visible: commentList.count === 0
               textFormat: Text.PlainText
-              text: parent.modelData.text
-              color: app.foreground
+              text: "No comments yet"
+              color: app.dim
               font.family: app.fontFamily
               font.pixelSize: Style.font.bodySmall
-              wrapMode: Text.Wrap
             }
           }
 
           Text {
-            anchors.centerIn: parent
-            visible: commentList.count === 0
+            Layout.fillWidth: true
             textFormat: Text.PlainText
-            text: "No comments yet"
+            wrapMode: Text.WordWrap
+            text: root.item
+              ? "Created by " + root.item.createdBy + " " + root.when(root.item.createdDate)
+                + "  ·  changed by " + root.item.changedBy + " " + root.when(root.item.changedDate)
+              : ""
             color: app.dim
             font.family: app.fontFamily
-            font.pixelSize: Style.font.bodySmall
+            font.pixelSize: Style.font.caption
           }
-        }
-
-        Text {
-          Layout.fillWidth: true
-          textFormat: Text.PlainText
-          wrapMode: Text.WordWrap
-          text: root.item
-            ? "Created by " + root.item.createdBy + " " + root.when(root.item.createdDate)
-              + "  ·  changed by " + root.item.changedBy + " " + root.when(root.item.changedDate)
-            : ""
-          color: app.dim
-          font.family: app.fontFamily
-          font.pixelSize: Style.font.caption
         }
       }
     }

@@ -1,13 +1,12 @@
 import Quickshell
 import Quickshell.Io
-import Quickshell.Wayland
 import QtQuick
 import qs.Commons
 import qs.Ui
 
 // Sprint board for an Azure DevOps team.
 //
-// One overlay card with four views: "setup" (organization, project, token),
+// One window with four views: "setup" (organization, project, token),
 // "teams" (pick the team), "board" (the sprint's stories with their tasks as
 // a keyboard list) and "detail" (view and edit one work item). All Azure
 // DevOps traffic goes through devops.py, which answers every call with one
@@ -17,7 +16,7 @@ import qs.Ui
 // story, Enter opens, Tab switches All / Mine, Ctrl+H hides closed sprints
 // and items, Ctrl+Left/Right changes
 // sprint, Ctrl+T team, Ctrl+R refresh, Ctrl+O open in the browser, Ctrl+,
-// connection settings, Escape clears the filter and then closes.
+// connection settings, Escape clears the filter. Super+W closes the window.
 Item {
   id: root
 
@@ -25,6 +24,8 @@ Item {
   property var manifest: null
 
   property bool opened: false
+  property bool closingFromHost: false
+  readonly property string windowTitle: "DevOps Board"
   property string view: "loading"
   property var status: null
   property var board: null
@@ -68,9 +69,11 @@ Item {
   property string fontFamily: Style.font.menuFamily
   property int contentMargin: Style.spacing.panelPadding
   property int contentSpacing: Style.spacing.lg
-  property int cardWidth: Math.min(Style.space(1080), panel.width - Style.gapsOut * 2)
-  property int cardHeight: Math.min(Style.space(760), panel.height - Style.gapsOut * 2)
   property int rowHeight: Math.max(Style.space(32), Style.font.body + Style.spacing.controlPaddingY * 2 + Style.space(8))
+
+  // Layout breakpoints for the window width.
+  readonly property bool compact: card.width < Style.space(900)
+  readonly property bool narrow: card.width < Style.space(620)
 
   readonly property var me: (board && board.user) || (status && status.user) || null
 
@@ -144,6 +147,10 @@ Item {
   // ---- open / close -----------------------------------------------------------------
 
   function open(payloadJson) {
+    if (opened) {
+      raise()
+      return
+    }
     opened = true
     themeFile.reload()
     filterText = ""
@@ -153,13 +160,25 @@ Item {
     focusKeys()
   }
 
+  // Host-initiated close (`shell hide`): the shell already knows.
   function close() {
+    closingFromHost = true
     opened = false
+    closingFromHost = false
   }
 
+  // User-initiated close; tells the shell so `toggle` stays in step.
   function dismiss() {
-    close()
     if (shell && typeof shell.hide === "function") shell.hide(pluginId)
+    else opened = false
+  }
+
+  // Summoned while already open (maybe on another workspace): bring it here.
+  function raise() {
+    Quickshell.execDetached(["bash", "-c",
+      "a=$(hyprctl clients -j | jq -r --arg t \"$1\" 'first(.[] | select(.title == $t) | .address) // empty'); "
+      + "[ -n \"$a\" ] && hyprctl dispatch \"hl.dsp.focus({ window = \\\"address:$a\\\" })\"",
+      "raise", windowTitle])
   }
 
   function toggle() {
@@ -178,7 +197,6 @@ Item {
   function openInBrowser(url) {
     if (!url) return
     Quickshell.execDetached(["xdg-open", url])
-    dismiss()
   }
 
   // ---- connection -------------------------------------------------------------------
@@ -709,6 +727,7 @@ Item {
     function refresh(): void { root.refreshBoard() }
     function item(id: int): void {
       if (!root.opened) root.shell ? root.shell.summon(root.pluginId, "{}") : root.open("{}")
+      else root.raise()
       root.openItem(id)
     }
   }
@@ -723,45 +742,32 @@ Item {
 
   // ---- window --------------------------------------------------------------------------
 
-  PanelWindow {
+  // A normal Hyprland window: it tiles, moves between workspaces and closes
+  // with the usual window keys.
+  FloatingWindow {
     id: panel
+    title: root.windowTitle
     visible: root.opened
-    anchors { top: true; bottom: true; left: true; right: true }
-    color: "transparent"
-    WlrLayershell.namespace: "funcoder-devops-board"
-    WlrLayershell.layer: WlrLayer.Overlay
-    WlrLayershell.keyboardFocus: WlrKeyboardFocus.Exclusive
-    exclusionMode: ExclusionMode.Ignore
+    color: root.background
+    implicitWidth: Style.space(1180)
+    implicitHeight: Style.space(820)
+    minimumSize: Qt.size(Style.space(720), Style.space(480))
 
-    Rectangle {
-      anchors.fill: parent
-      color: root.scrim
+    onVisibleChanged: {
+      if (visible || !root.opened) return
+      // Closed by the window manager (Super+W).
+      root.opened = false
+      if (!root.closingFromHost && root.shell && typeof root.shell.hide === "function") root.shell.hide(root.pluginId)
     }
 
-    MouseArea {
-      anchors.fill: parent
-      onClicked: if (!(root.view === "detail" && detail.dirty)) root.dismiss()
-    }
-
-    BorderSurface {
+    Item {
       id: card
-      width: root.cardWidth
-      height: root.cardHeight
-      radius: root.cornerRadius
-      anchors.centerIn: parent
-      color: root.background
-      borderSpec: root.borderSpec
-      padding: root.contentMargin
-
-      MouseArea { anchors.fill: parent; onClicked: {} }
+      anchors.fill: parent
+      anchors.margins: root.contentMargin
 
       Item {
         id: content
         anchors.fill: parent
-        anchors.topMargin: card.contentTopInset
-        anchors.rightMargin: card.contentRightInset
-        anchors.bottomMargin: card.contentBottomInset
-        anchors.leftMargin: card.contentLeftInset
 
         // ---------- loading ----------
         Text {
@@ -842,7 +848,6 @@ Item {
             var row = root.selectedRow()
             if (event.key === Qt.Key_Escape) {
               if (root.filterText !== "") root.setFilter("")
-              else root.dismiss()
             } else if (ctrl && event.key === Qt.Key_R) {
               root.refreshBoard()
             } else if (ctrl && event.key === Qt.Key_T) {
@@ -896,12 +901,14 @@ Item {
             Item {
               id: header
               width: parent.width
-              height: Math.max(heroIcon.implicitHeight, heroLabels.implicitHeight, sprintNav.implicitHeight)
+              height: root.compact
+                ? Math.max(heroIcon.implicitHeight, heroLabels.implicitHeight) + (sprintNav.visible ? Style.spacing.lg + sprintNav.implicitHeight : 0)
+                : Math.max(heroIcon.implicitHeight, heroLabels.implicitHeight, sprintNav.implicitHeight)
 
               Text {
                 id: heroIcon
                 anchors.left: parent.left
-                anchors.verticalCenter: parent.verticalCenter
+                anchors.verticalCenter: heroLabels.verticalCenter
                 textFormat: Text.PlainText
                 text: root.view === "teams" ? root.glyphTeam : root.glyphBoard
                 color: root.foreground
@@ -913,9 +920,10 @@ Item {
                 id: heroLabels
                 anchors.left: heroIcon.right
                 anchors.leftMargin: Style.space(14)
-                anchors.right: sprintNav.left
-                anchors.rightMargin: root.contentSpacing
-                anchors.verticalCenter: parent.verticalCenter
+                anchors.right: root.compact ? parent.right : sprintNav.left
+                anchors.rightMargin: root.compact ? 0 : root.contentSpacing
+                anchors.verticalCenter: root.compact ? undefined : parent.verticalCenter
+                anchors.top: root.compact ? parent.top : undefined
                 spacing: Style.space(2)
 
                 Text {
@@ -960,7 +968,8 @@ Item {
               Row {
                 id: sprintNav
                 anchors.right: parent.right
-                anchors.verticalCenter: parent.verticalCenter
+                anchors.verticalCenter: root.compact ? undefined : parent.verticalCenter
+                anchors.bottom: root.compact ? parent.bottom : undefined
                 spacing: Style.spacing.sm
                 visible: root.view === "board" && root.board !== null
 
@@ -975,7 +984,8 @@ Item {
 
                 Text {
                   anchors.verticalCenter: parent.verticalCenter
-                  width: Math.max(Style.space(110), implicitWidth)
+                  width: Math.min(Math.max(Style.space(110), implicitWidth), root.narrow ? card.width * 0.26 : root.compact ? card.width * 0.4 : Style.space(320))
+                  elide: Text.ElideRight
                   horizontalAlignment: Text.AlignHCenter
                   textFormat: Text.PlainText
                   text: root.board ? root.board.iteration.name
@@ -1032,7 +1042,7 @@ Item {
                 Button {
                   anchors.verticalCenter: parent.verticalCenter
                   iconText: root.hideClosed ? "\uF070" : "\uF06E"
-                  text: "Closed"
+                  text: root.narrow ? "" : "Closed"
                   fontSize: Style.font.body
                   foreground: root.foreground
                   fontFamily: root.fontFamily
@@ -1265,7 +1275,7 @@ Item {
               textFormat: Text.PlainText
               text: root.view === "teams"
                 ? "Type to filter  ·  ↑↓ select  ·  Enter choose  ·  Ctrl+, connection  ·  Esc back"
-                : "↑↓ move  ·  →← expand  ·  Enter open  ·  Tab all/mine  ·  Ctrl+H hide closed  ·  Ctrl+←→ sprint  ·  Ctrl+T team  ·  Ctrl+O browser  ·  Ctrl+, connection  ·  Esc close"
+                : "↑↓ move  ·  →← expand  ·  Enter open  ·  Tab all/mine  ·  Ctrl+H hide closed  ·  Ctrl+←→ sprint  ·  Ctrl+T team  ·  Ctrl+O browser  ·  Ctrl+, connection  ·  Esc clear filter"
               color: root.foreground
               opacity: 0.5
               font.family: root.fontFamily
@@ -1372,7 +1382,8 @@ Item {
       anchors.left: glyph.right
       anchors.leftMargin: Style.spacing.lg
       anchors.verticalCenter: parent.verticalCenter
-      width: Style.space(46)
+      visible: !root.narrow
+      width: root.narrow ? 0 : Style.space(46)
       textFormat: Text.PlainText
       text: row.itemId > 0 ? String(row.itemId) : ""
       color: root.dim
@@ -1406,7 +1417,7 @@ Item {
 
       Text {
         id: tagLabel
-        visible: row.tags !== "" || row.outside
+        visible: !root.compact && (row.tags !== "" || row.outside)
         anchors.verticalCenter: parent.verticalCenter
         width: Math.min(implicitWidth, parent.width * 0.3)
         textFormat: Text.PlainText
@@ -1428,11 +1439,11 @@ Item {
       // Task completion for a story: a small bar plus done/total.
       Item {
         anchors.verticalCenter: parent.verticalCenter
-        width: Style.space(96)
+        width: root.compact ? Style.space(40) : Style.space(96)
         height: countLabel.implicitHeight
 
         Item {
-          visible: row.isStory && row.taskTotal > 0
+          visible: !root.compact && row.isStory && row.taskTotal > 0
           anchors.left: parent.left
           anchors.right: countLabel.left
           anchors.rightMargin: Style.spacing.md
@@ -1474,6 +1485,7 @@ Item {
 
       Text {
         anchors.verticalCenter: parent.verticalCenter
+        visible: !root.narrow
         width: Style.space(44)
         horizontalAlignment: Text.AlignRight
         textFormat: Text.PlainText
@@ -1485,7 +1497,8 @@ Item {
 
       Text {
         anchors.verticalCenter: parent.verticalCenter
-        width: Style.space(84)
+        visible: !root.narrow
+        width: root.compact ? Style.space(62) : Style.space(84)
         textFormat: Text.PlainText
         text: row.state
         color: root.stateColor(row.state, row.category)
