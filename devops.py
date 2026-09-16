@@ -200,6 +200,27 @@ def normalize_org(org_input, project_input):
 # ---- HTTP ---------------------------------------------------------------------
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """urllib would replay the Authorization header (the token) to wherever a
+    redirect points. Azure DevOps only redirects when it wants a browser
+    sign-in, so treat any redirect as a rejected token instead of following it."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise urllib.error.HTTPError(req.full_url, 401, "redirected to sign-in", headers, fp)
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
+def check_secure(url):
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme == "https":
+        return
+    if parsed.scheme == "http" and parsed.hostname in ("localhost", "127.0.0.1", "::1"):
+        return
+    raise Failure("Use an https:// organization URL; the token would otherwise travel unencrypted")
+
+
 class Client:
     def __init__(self, org, project, token):
         self.org = org
@@ -224,9 +245,10 @@ class Client:
         if body is not None:
             data = json.dumps(body).encode()
             headers["Content-Type"] = content_type
+        check_secure(url)
         req = urllib.request.Request(url, data=data, headers=headers, method=method)
         try:
-            with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+            with _OPENER.open(req, timeout=TIMEOUT) as resp:
                 raw = resp.read()
                 ctype = resp.headers.get("Content-Type", "")
         except urllib.error.HTTPError as exc:
