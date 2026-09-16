@@ -37,7 +37,7 @@ Item {
   property string filterText: ""
   property var expanded: ({})
   property int selectedIndex: 0
-  property var stats: ({ tasks: 0, done: 0, doing: 0, remaining: 0, points: 0, pointsDone: 0 })
+  property var stats: ({ tasks: 0, done: 0, doing: 0, blocked: 0, remaining: 0, points: 0, pointsDone: 0 })
 
   property var teams: []
   property string teamFilter: ""
@@ -74,6 +74,13 @@ Item {
 
   readonly property var me: (board && board.user) || (status && status.user) || null
 
+  // State colours come from the current Omarchy theme's named colours.
+  property var themeColors: ({})
+  readonly property color colorBlocked: themeColor(["red", "color1"], Color.urgent)
+  readonly property color colorActive: themeColor(["blue", "color4"], Color.accent)
+  readonly property color colorReview: themeColor(["yellow", "color3"], "#e0af68")
+  readonly property color colorDone: themeColor(["green", "color2"], "#9ece6a")
+
   // Nerd Font glyphs.
   readonly property string glyphBoard: "\uF0AE"
   readonly property string glyphStory: "\uF02D"
@@ -87,6 +94,7 @@ Item {
   readonly property string glyphRight: "\uF054"
   readonly property string glyphTeam: "\uF0C0"
   readonly property string glyphSync: "\uF021"
+  readonly property string glyphBlocked: "\uF05E"
 
   // ---- helper processes -------------------------------------------------------
 
@@ -135,6 +143,7 @@ Item {
 
   function open(payloadJson) {
     opened = true
+    themeFile.reload()
     filterText = ""
     if (view === "detail" || view === "teams") view = board ? "board" : "loading"
     if (!status || !status.connected) loadStatus()
@@ -294,7 +303,7 @@ Item {
 
   function applyBoard(data) {
     board = data
-    var s = { tasks: 0, done: 0, doing: 0, remaining: 0, points: 0, pointsDone: 0 }
+    var s = { tasks: 0, done: 0, doing: 0, blocked: 0, remaining: 0, points: 0, pointsDone: 0 }
     var stories = data.stories || []
     var nextExpanded = Object.assign({}, expanded)
     for (var i = 0; i < stories.length; i++) {
@@ -311,6 +320,7 @@ Item {
         else {
           open++
           if (t.category === "doing") s.doing++
+          if (stateKind(t.state, t.category) === "blocked") s.blocked++
           s.remaining += Number(t.remaining) || 0
         }
       }
@@ -332,7 +342,7 @@ Item {
     if (next === idx) return
     iterationId = its[next].id
     board = Object.assign({}, board, { iteration: its[next], stories: [] })
-    stats = { tasks: 0, done: 0, doing: 0, remaining: 0, points: 0, pointsDone: 0 }
+    stats = { tasks: 0, done: 0, doing: 0, blocked: 0, remaining: 0, points: 0, pointsDone: 0 }
     selectedIndex = 0
     rebuild()
     var seq = boardSeq
@@ -612,14 +622,52 @@ Item {
     var parts = []
     parts.push(stats.done + " of " + stats.tasks + (stats.tasks === 1 ? " task" : " tasks") + " done")
     if (stats.doing > 0) parts.push(stats.doing + " in progress")
+    if (stats.blocked > 0) parts.push(stats.blocked + " blocked")
     if (stats.remaining > 0) parts.push(number(stats.remaining) + "h left")
     if (stats.points > 0) parts.push(number(stats.pointsDone) + " of " + number(stats.points) + " points")
     if (hideClosed && hiddenCount > 0) parts.push(hiddenCount + " closed hidden")
     return parts.join("  ·  ")
   }
 
-  function stateGlyph(category) {
-    return category === "done" ? glyphDone : category === "doing" ? glyphDoing : glyphTodo
+  function themeColor(keys, fallback) {
+    for (var i = 0; i < keys.length; i++) if (themeColors[keys[i]]) return themeColors[keys[i]]
+    return fallback
+  }
+
+  function loadThemeColors(raw) {
+    var out = {}
+    var lines = String(raw || "").split("\n")
+    for (var i = 0; i < lines.length; i++) {
+      var m = lines[i].match(/^\s*([A-Za-z0-9_]+)\s*=\s*["']?(#[0-9A-Fa-f]{6})/)
+      if (m) out[m[1]] = m[2]
+    }
+    themeColors = out
+  }
+
+  // "blocked", "review", "done", "active" or "todo". Blocked and review are
+  // read from the state name, since processes file them under In Progress.
+  function stateKind(state, category) {
+    var name = String(state || "").toLowerCase()
+    if (category === "done") return "done"
+    if (/block|hold|imped|wait|stuck|paused/.test(name)) return "blocked"
+    if (/review|test|qa|verif|resolved|ready|approval/.test(name) && category !== "todo") return "review"
+    if (category === "doing") return "active"
+    return "todo"
+  }
+
+  function stateColor(state, category, neutral) {
+    var kind = stateKind(state, category)
+    if (kind === "blocked") return colorBlocked
+    if (kind === "review") return colorReview
+    if (kind === "active") return colorActive
+    if (kind === "done") return colorDone
+    return neutral !== undefined ? neutral : dim
+  }
+
+  function stateGlyph(category, state) {
+    if (category === "done") return glyphDone
+    if (stateKind(state, category) === "blocked") return glyphBlocked
+    return category === "doing" ? glyphDoing : glyphTodo
   }
 
   function updatedText() {
@@ -641,6 +689,15 @@ Item {
   }
 
   ListModel { id: rowsModel }
+
+  FileView {
+    id: themeFile
+    path: Color.currentThemePath + "/colors.toml"
+    watchChanges: true
+    printErrors: false
+    onLoaded: root.loadThemeColors(text())
+    onFileChanged: reload()
+  }
 
   IpcHandler {
     target: root.pluginId
@@ -1015,7 +1072,7 @@ Item {
                   anchors.left: track.left
                   height: track.height
                   radius: track.radius
-                  color: Util.alpha(root.foreground, 0.4)
+                  color: root.colorActive
                   width: root.stats.tasks > 0 ? track.width * (root.stats.done + root.stats.doing) / root.stats.tasks : 0
                   Behavior on width { NumberAnimation { duration: 320; easing.type: Easing.OutCubic } }
                 }
@@ -1024,7 +1081,7 @@ Item {
                   anchors.left: track.left
                   height: track.height
                   radius: track.radius
-                  color: root.foreground
+                  color: root.colorDone
                   width: root.stats.tasks > 0 ? Math.max(root.stats.done > 0 ? track.height : 0, track.width * root.stats.done / root.stats.tasks) : 0
                   Behavior on width { NumberAnimation { duration: 320; easing.type: Easing.OutCubic } }
                 }
@@ -1301,8 +1358,8 @@ Item {
       anchors.verticalCenter: parent.verticalCenter
       textFormat: Text.PlainText
       text: row.itemId === 0 ? root.glyphClosed
-        : (row.isStory && row.type === "Bug" ? root.glyphBug : root.stateGlyph(row.category))
-      color: row.category === "doing" ? root.selectedText : root.foreground
+        : (row.isStory && row.type === "Bug" ? root.glyphBug : root.stateGlyph(row.category, row.state))
+      color: row.itemId === 0 ? root.dim : root.stateColor(row.state, row.category, root.foreground)
       opacity: row.isDone ? 0.5 : 1
       font.family: root.fontFamily
       font.pixelSize: row.isStory ? Style.font.title : Style.font.body
@@ -1388,13 +1445,13 @@ Item {
           Rectangle {
             height: parent.height
             radius: height / 2
-            color: Util.alpha(root.foreground, 0.4)
+            color: root.colorActive
             width: row.taskTotal > 0 ? parent.width * (row.taskDone + row.taskDoing) / row.taskTotal : 0
           }
           Rectangle {
             height: parent.height
             radius: height / 2
-            color: root.foreground
+            color: root.colorDone
             width: row.taskTotal > 0 ? parent.width * row.taskDone / row.taskTotal : 0
           }
         }
@@ -1429,10 +1486,10 @@ Item {
         width: Style.space(84)
         textFormat: Text.PlainText
         text: row.state
-        color: row.category === "doing" ? root.selectedText : root.dim
+        color: root.stateColor(row.state, row.category)
         font.family: root.fontFamily
         font.pixelSize: Style.font.caption
-        font.bold: row.category === "doing"
+        font.bold: root.stateKind(row.state, row.category) !== "todo" && !row.isDone
         elide: Text.ElideRight
       }
 

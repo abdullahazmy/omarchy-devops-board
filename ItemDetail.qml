@@ -266,9 +266,9 @@ Item {
         textFormat: Text.PlainText
         text: !root.item ? app.glyphBoard
           : root.item.type === "Bug" ? app.glyphBug
-          : root.item.type === "Task" ? app.stateGlyph(root.item.category)
+          : root.item.type === "Task" ? app.stateGlyph(root.item.category, root.item.state)
           : app.glyphStory
-        color: app.foreground
+        color: root.item ? app.stateColor(root.item.state, root.item.category, app.foreground) : app.foreground
         font.family: app.fontFamily
         font.pixelSize: Style.font.display
       }
@@ -730,8 +730,8 @@ Item {
       anchors.leftMargin: Style.spacing.md
       anchors.verticalCenter: parent.verticalCenter
       textFormat: Text.PlainText
-      text: linkRow.link ? (linkRow.link.type === "Bug" ? app.glyphBug : app.stateGlyph(linkRow.link.category)) : ""
-      color: linkRow.link && linkRow.link.category === "doing" ? app.selectedText : app.foreground
+      text: linkRow.link ? (linkRow.link.type === "Bug" ? app.glyphBug : app.stateGlyph(linkRow.link.category, linkRow.link.state)) : ""
+      color: linkRow.link ? app.stateColor(linkRow.link.state, linkRow.link.category, app.foreground) : app.foreground
       opacity: linkRow.link && linkRow.link.category === "done" ? 0.5 : 1
       font.family: app.fontFamily
       font.pixelSize: Style.font.body
