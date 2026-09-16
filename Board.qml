@@ -121,6 +121,8 @@ Item {
         } catch (e) {
           data = { error: "The helper returned something unreadable" }
         }
+        if (data && data.error)
+          console.warn(root.pluginId + ": " + command.slice(1).join(" ") + ": " + data.error)
         var cb = callback
         callback = null
         try { if (cb) cb(data) } catch (e) { console.warn(root.pluginId + ": callback failed", e) }
