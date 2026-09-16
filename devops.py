@@ -17,6 +17,7 @@ Commands:
   item <id>                    one work item with everything the editor needs
   update <id>                  stdin {"rev", "changes": {...}}; saves edits
   comment <id>                 stdin {"text"}; adds a discussion comment
+  pref hideClosed on|off       remember whether closed sprints and items are hidden
   demo on|off                  serve built-in sample data (no Azure access)
 
 The token lives in the desktop keyring (secret-tool), keyed by organization.
@@ -521,7 +522,8 @@ def cmd_status(args):
     cfg = load_config()
     if cfg.get("demo"):
         return {"connected": True, "demo": True, "org": "https://dev.azure.com/demo", "project": "Demo",
-                "team": {"id": "demo", "name": "Phoenix Team", "project": "Demo"}, "user": DEMO_ME}
+                "team": {"id": "demo", "name": "Phoenix Team", "project": "Demo"}, "user": DEMO_ME,
+                "hideClosed": bool(cfg.get("hideClosed"))}
     has_token = bool(cfg.get("org") and token_lookup(cfg["org"]))
     team = cfg.get("team") if cfg.get("project") else None
     return {
@@ -531,6 +533,7 @@ def cmd_status(args):
         "team": team or None,
         "user": cfg.get("user") or None,
         "hasToken": has_token,
+        "hideClosed": bool(cfg.get("hideClosed")),
     }
 
 
@@ -583,7 +586,8 @@ def cmd_connect(args):
         team = next((t for t in teams if t["id"] == cfg["team"].get("id")), None)
     if not team and len(teams) == 1:
         team = teams[0]
-    save_config({"org": org, "project": team["project"] if team else "", "team": team, "user": me})
+    save_config({"org": org, "project": team["project"] if team else "", "team": team, "user": me,
+                 "hideClosed": bool(cfg.get("hideClosed"))})
     return {"ok": True, "org": org, "project": team["project"] if team else "", "user": me, "team": team,
             "teams": teams, "projectHint": project_hint}
 
@@ -592,7 +596,7 @@ def cmd_disconnect(args):
     cfg = load_config()
     if cfg.get("org"):
         token_clear(cfg["org"])
-    save_config({"org": cfg.get("org", "")})
+    save_config({"org": cfg.get("org", ""), "hideClosed": bool(cfg.get("hideClosed"))})
     return {"ok": True}
 
 
@@ -947,6 +951,18 @@ def cmd_comment(args):
     return {"ok": True, "item": cmd_item([wid])}
 
 
+PREFS = {"hideClosed"}
+
+
+def cmd_pref(args):
+    if len(args) != 2 or args[0] not in PREFS or args[1] not in ("on", "off"):
+        raise Failure("Usage: pref hideClosed on|off")
+    cfg = load_config()
+    cfg[args[0]] = args[1] == "on"
+    save_config(cfg)
+    return {"ok": True, args[0]: cfg[args[0]]}
+
+
 def cmd_demo(args):
     cfg = load_config()
     cfg["demo"] = bool(args and args[0] == "on")
@@ -1118,6 +1134,7 @@ COMMANDS = {
     "update": cmd_update,
     "comment": cmd_comment,
     "demo": cmd_demo,
+    "pref": cmd_pref,
 }
 
 

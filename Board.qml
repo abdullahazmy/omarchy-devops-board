@@ -14,7 +14,8 @@ import qs.Ui
 // JSON object; the board shows its cached copy first and refreshes behind it.
 //
 // Board keys: type to filter, Up/Down move, Right/Left expand or collapse a
-// story, Enter opens, Tab switches All / Mine, Ctrl+Left/Right changes
+// story, Enter opens, Tab switches All / Mine, Ctrl+H hides closed sprints
+// and items, Ctrl+Left/Right changes
 // sprint, Ctrl+T team, Ctrl+R refresh, Ctrl+O open in the browser, Ctrl+,
 // connection settings, Escape clears the filter and then closes.
 Item {
@@ -31,6 +32,8 @@ Item {
   property string boardError: ""
   property string iterationId: ""
   property bool mineOnly: false
+  property bool hideClosed: false
+  property int hiddenCount: 0
   property string filterText: ""
   property var expanded: ({})
   property int selectedIndex: 0
@@ -173,6 +176,7 @@ Item {
     if (view !== "board" && view !== "detail") view = "loading"
     run(["status"], null, function(data) {
       status = data
+      hideClosed = data.hideClosed === true
       if (data.error) {
         boardError = data.error
         view = "setup"
@@ -321,7 +325,7 @@ Item {
 
   function changeSprint(delta) {
     if (!board || !board.iterations || board.iterations.length === 0) return
-    var its = board.iterations
+    var its = sprintChoices()
     var idx = -1
     for (var i = 0; i < its.length; i++) if (its[i].id === board.iteration.id) idx = i
     var next = Math.max(0, Math.min(its.length - 1, idx + delta))
@@ -336,6 +340,29 @@ Item {
       if (seq === boardSeq - 1 && !data.error && !data.cacheMiss && board.stories.length === 0) applyBoard(data)
     })
     refreshBoard()
+  }
+
+  // Sprints the arrows step through; closed (past) ones drop out while hidden,
+  // except the one being looked at.
+  function sprintChoices() {
+    if (!board || !board.iterations) return []
+    return board.iterations.filter(function(it) {
+      return !hideClosed || it.timeFrame !== "past" || it.id === board.iteration.id
+    })
+  }
+
+  function setHideClosed(value) {
+    hideClosed = value
+    run(["pref", "hideClosed", value ? "on" : "off"], null, null)
+    if (value && board && board.iteration && board.iteration.timeFrame === "past") {
+      // Back to the current sprint.
+      iterationId = ""
+      board = Object.assign({}, board, { stories: [] })
+      refreshBoard()
+    }
+    selectedIndex = 0
+    rebuild()
+    list.positionViewAtBeginning()
   }
 
   function isMine(email) {
@@ -391,12 +418,22 @@ Item {
     var needle = filterText.toLowerCase().trim()
     var stories = board.stories || []
     var restore = -1
+    var hidden = 0
     for (var i = 0; i < stories.length; i++) {
       var story = stories[i]
       var storyMine = isMine(story.assignedEmail)
       var tasks = story.tasks.filter(function(t) {
+        if (hideClosed && t.category === "done") {
+          hidden++
+          return false
+        }
         return (!mineOnly || storyMine || isMine(t.assignedEmail))
       })
+      var openTasks = story.tasks.some(function(t) { return t.category !== "done" })
+      if (hideClosed && story.category === "done" && !openTasks) {
+        hidden++
+        continue
+      }
       var storyHit = matches(story, needle)
       if (needle !== "" && !storyHit) tasks = tasks.filter(function(t) { return matches(t, needle) })
       if (mineOnly && !storyMine && tasks.length === 0) continue
@@ -421,6 +458,7 @@ Item {
         rowsModel.append(trow)
       }
     }
+    hiddenCount = hidden
     if (restore >= 0) selectedIndex = restore
     selectedIndex = Math.max(0, Math.min(rowsModel.count - 1, selectedIndex))
   }
@@ -576,6 +614,7 @@ Item {
     if (stats.doing > 0) parts.push(stats.doing + " in progress")
     if (stats.remaining > 0) parts.push(number(stats.remaining) + "h left")
     if (stats.points > 0) parts.push(number(stats.pointsDone) + " of " + number(stats.points) + " points")
+    if (hideClosed && hiddenCount > 0) parts.push(hiddenCount + " closed hidden")
     return parts.join("  ·  ")
   }
 
@@ -597,6 +636,7 @@ Item {
     if (filterText !== "") return "Nothing matches “" + filterText + "”"
     if (mineOnly) return "Nothing assigned to you in " + board.iteration.name
     if (boardLoading) return "Loading " + board.iteration.name + "…"
+    if (hideClosed && hiddenCount > 0) return "Everything in " + board.iteration.name + " is closed  ·  Ctrl+H shows it"
     return "No stories planned for " + board.iteration.name
   }
 
@@ -748,6 +788,8 @@ Item {
               root.refreshBoard()
             } else if (ctrl && event.key === Qt.Key_T) {
               root.showTeams()
+            } else if (ctrl && event.key === Qt.Key_H) {
+              root.setHideClosed(!root.hideClosed)
             } else if (ctrl && event.key === Qt.Key_Comma) {
               root.showSetup()
             } else if (ctrl && event.key === Qt.Key_O) {
@@ -841,7 +883,7 @@ Item {
                     }
                     if (!root.board) return (root.status ? root.status.project : "").toUpperCase()
                     var it = root.board.iteration
-                    var parts = [root.board.project, it.name]
+                    var parts = [root.board.project]
                     if (it.start && it.finish) parts.push(root.shortDate(it.start) + " – " + root.shortDate(it.finish))
                     var p = root.sprintProgress().text
                     if (p) parts.push(p)
@@ -926,6 +968,18 @@ Item {
                       onClicked: root.setMineOnly(parent.index === 1)
                     }
                   }
+                }
+
+                Button {
+                  anchors.verticalCenter: parent.verticalCenter
+                  iconText: root.hideClosed ? "\uF070" : "\uF06E"
+                  text: "Closed"
+                  fontSize: Style.font.body
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  selected: root.hideClosed
+                  tooltipText: root.hideClosed ? "Show closed sprints and items  (Ctrl+H)" : "Hide closed sprints and items  (Ctrl+H)"
+                  onClicked: root.setHideClosed(!root.hideClosed)
                 }
 
                 PanelActionButton {
@@ -1152,7 +1206,7 @@ Item {
               textFormat: Text.PlainText
               text: root.view === "teams"
                 ? "Type to filter  ·  ↑↓ select  ·  Enter choose  ·  Ctrl+, connection  ·  Esc back"
-                : "↑↓ move  ·  →← expand  ·  Enter open  ·  Tab all/mine  ·  Ctrl+←→ sprint  ·  Ctrl+T team  ·  Ctrl+O browser  ·  Ctrl+, connection  ·  Esc close"
+                : "↑↓ move  ·  →← expand  ·  Enter open  ·  Tab all/mine  ·  Ctrl+H hide closed  ·  Ctrl+←→ sprint  ·  Ctrl+T team  ·  Ctrl+O browser  ·  Ctrl+, connection  ·  Esc close"
               color: root.foreground
               opacity: 0.5
               font.family: root.fontFamily
