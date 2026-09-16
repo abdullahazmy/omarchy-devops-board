@@ -39,7 +39,7 @@ omarchy plugin enable funcoder.devops-board
 Bind a key in `~/.config/hypr/bindings.lua`:
 
 ```lua
-o.bind("SUPER + SHIFT + D", "DevOps board", "omarchy-shell shell toggle funcoder.devops-board '{}'")
+o.bind("SUPER + SHIFT + PERIOD", "DevOps board", "omarchy-shell shell toggle funcoder.devops-board '{}'")
 ```
 
 On first open, enter your organization (a URL like
