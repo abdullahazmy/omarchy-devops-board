@@ -999,7 +999,7 @@ def cmd_demo(args):
 
 # ---- demo data ----------------------------------------------------------------------
 
-DEMO_ME = {"name": "Jonathan Buckland", "email": "jonathan@example.com"}
+DEMO_ME = {"name": "Alex Morgan", "email": "alex@example.com"}
 DEMO_TEAMS = [{"id": "demo", "name": "Phoenix Team", "project": "Demo"},
               {"id": "demo2", "name": "Platform Team", "project": "Demo"}]
 DEMO_PEOPLE = [DEMO_ME, {"name": "Priya Shah", "email": "priya@example.com"},
