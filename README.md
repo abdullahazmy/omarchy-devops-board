@@ -17,6 +17,8 @@ or task.
 - Works with the Agile, Scrum and CMMI processes and their custom
   inheritances. States and fields are read from the process.
 
+![The board with demo data: a sprint of user stories and a bug, tasks nested underneath, sprint progress and assignee initials](preview.png)
+
 ## Keys
 
 | Where | Keys |
