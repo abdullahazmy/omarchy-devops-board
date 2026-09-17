@@ -781,7 +781,7 @@ Item {
         }
 
         // ---------- setup ----------
-        Setup {
+        Connection {
           id: setup
           anchors.fill: parent
           visible: root.view === "setup"
