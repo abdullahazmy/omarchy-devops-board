@@ -7,9 +7,18 @@
   "license": "MIT",
   "description": "Your Azure DevOps team's sprint in a keyboard-driven Omarchy window: user stories with their tasks, progress through the sprint, and an editor for any story or task.",
   "keywords": ["azure", "devops", "sprint", "scrum", "agile", "board", "tasks", "work items"],
-  "kinds": ["panel"],
+  "kinds": ["panel", "bar-widget"],
   "keepLoaded": true,
   "entryPoints": {
-    "panel": "Board.qml"
+    "panel": "Board.qml",
+    "barWidget": "BarButton.qml"
+  },
+  "barWidget": {
+    "displayName": "DevOps Board",
+    "description": "Opens your Azure DevOps sprint board",
+    "category": "Productivity",
+    "aliases": ["azure", "devops", "sprint", "board"],
+    "allowMultiple": false,
+    "defaultSection": "right"
   }
 }
