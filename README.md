@@ -29,21 +29,33 @@ Rich text is edited as light markdown: paragraphs, `- ` and `1. ` lists,
 containing images or tables is read-only here (Ctrl+O edits it in the
 browser), so nothing is lost in the round trip.
 
-## Setup
+## Requirements
 
-```bash
-./deploy-local.sh
-omarchy plugin enable funcoder.devops-board
+- [Omarchy](https://omarchy.org) 4 (the Quickshell-based shell with plugins).
+  Python 3 is included with Omarchy.
+- `secret-tool` (libsecret) and a running keyring such as GNOME Keyring, to
+  store the access token. Without it, set `AZURE_DEVOPS_EXT_PAT` instead.
+- An Azure DevOps organization and a personal access token (see below).
+
+## Install
+
+```sh
+omarchy plugin add https://github.com/funcoder/omarchy-devops-board.git --enable
 ```
+
+The **DevOps Board** bar widget can be added from Omarchy's bar settings. Update
+with `omarchy plugin update funcoder.devops-board`.
 
 The board is a normal Hyprland window (title `DevOps Board`): it tiles, moves
 between workspaces and closes with Super+W. Its layout adapts to narrow tiles.
 `summon` opens it, or focuses it if it's already open. Bind a key in
-`~/.config/hypr/bindings.lua`:
+`~/.config/hypr/bindings.lua` and run `hyprctl reload`:
 
 ```lua
 o.bind("SUPER + SHIFT + PERIOD", "DevOps board", "omarchy-shell shell summon funcoder.devops-board '{}'")
 ```
+
+## Setup
 
 On first open, step 1 asks for access: your organization (a URL like
 `https://dev.azure.com/contoso`, or paste any Azure DevOps URL) and a personal
@@ -53,8 +65,17 @@ access token with **Work Items (Read & write)** and **Project and Team
 team the token can see, with its project; pick yours (Ctrl+T switches later).
 "Try with demo data" shows a sample sprint without connecting.
 
-Re-run `./deploy-local.sh` after editing. If QML changes don't show up, run
-`omarchy restart shell`.
+## Remove
+
+Disconnect from the connection screen (Ctrl+,) first to delete the token from
+the keyring, then:
+
+```sh
+omarchy plugin remove funcoder.devops-board
+rm -rf ~/.config/funcoder-devops-board ~/.cache/funcoder-devops-board   # optional: settings and cache
+```
+
+Also delete the key binding from `~/.config/hypr/bindings.lua`.
 
 ## Files
 
@@ -76,3 +97,9 @@ $H item 4812
 echo '{"changes":{"state":"Active"}}' | $H update 4812
 omarchy-shell funcoder.devops-board item 4812   # open the card on an item
 ```
+
+## Development
+
+`./deploy-local.sh` copies a checkout into `~/.config/omarchy/plugins` and
+validates it. Re-run it after editing. If QML changes don't show up, run
+`omarchy restart shell`.
