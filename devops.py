@@ -43,6 +43,17 @@ CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 CACHE_DIR = os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"), APP)
 API = "7.1"
 TIMEOUT = 25
+# The socket timeout only bounds a single quiet stretch, so a response that
+# keeps trickling in could otherwise run forever. These bound the whole thing:
+# total time, total bytes, and the shape of what is handed to the shell.
+DEADLINE = 90
+MAX_BODY_BYTES = 8 * 1024 * 1024
+MAX_ERROR_BYTES = 64 * 1024
+CHUNK = 64 * 1024
+MAX_ITEMS = 5000
+MAX_STRING = 1000 * 1000
+MAX_NODES = 200 * 1000
+MAX_DEPTH = 32
 
 POINTS_FIELDS = [
     "Microsoft.VSTS.Scheduling.StoryPoints",  # Agile
@@ -200,6 +211,59 @@ def normalize_org(org_input, project_input):
 # ---- HTTP ---------------------------------------------------------------------
 
 
+def read_limited(resp, limit, deadline, what="Azure DevOps"):
+    """Read a response body up to `limit` bytes and no longer than the deadline."""
+    chunks, total = [], 0
+    # read1 hands back whatever has arrived instead of waiting for a full
+    # chunk, so a response delivered a few bytes at a time still hits the
+    # deadline check rather than trickling on indefinitely.
+    read = getattr(resp, "read1", None) or resp.read
+    while True:
+        if time.monotonic() > deadline:
+            raise Failure("%s took too long to answer" % what)
+        try:
+            chunk = read(min(CHUNK, limit + 1 - total))
+        except TimeoutError:
+            raise Failure("%s took too long to answer" % what)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > limit:
+            raise Failure("%s sent more data than this board will read" % what)
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def check_shape(data, depth=0, budget=None):
+    """Refuse a payload with absurd counts, lengths or nesting before it is used.
+
+    Nothing is truncated: a board that silently dropped half a description
+    could write the short version back.
+    """
+    if budget is None:
+        budget = [MAX_NODES]
+    budget[0] -= 1
+    if budget[0] < 0:
+        raise Failure("Azure DevOps returned more data than this board can show")
+    if depth > MAX_DEPTH:
+        raise Failure("Azure DevOps returned a deeply nested answer this board won't read")
+    if isinstance(data, str):
+        if len(data) > MAX_STRING:
+            raise Failure("Azure DevOps returned an oversized field this board won't show")
+    elif isinstance(data, list):
+        if len(data) > MAX_ITEMS:
+            raise Failure("Azure DevOps returned more than %d items; narrow the query" % MAX_ITEMS)
+        for item in data:
+            check_shape(item, depth + 1, budget)
+    elif isinstance(data, dict):
+        if len(data) > MAX_ITEMS:
+            raise Failure("Azure DevOps returned an answer with too many fields")
+        for key, value in data.items():
+            check_shape(key, depth + 1, budget)
+            check_shape(value, depth + 1, budget)
+    return data
+
+
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
     """urllib would replay the Authorization header (the token) to wherever a
     redirect points. Azure DevOps only redirects when it wants a browser
@@ -238,7 +302,8 @@ class Client:
         query.update(params or {})
         return url + ("&" if "?" in url else "?") + urllib.parse.urlencode(query)
 
-    def request(self, method, url, body=None, content_type="application/json"):
+    def request(self, method, url, body=None, content_type="application/json", deadline=None):
+        deadline = deadline or (time.monotonic() + DEADLINE)
         auth = base64.b64encode((":" + self.token).encode()).decode()
         headers = {"Authorization": "Basic " + auth, "Accept": "application/json"}
         data = None
@@ -249,14 +314,15 @@ class Client:
         req = urllib.request.Request(url, data=data, headers=headers, method=method)
         try:
             with _OPENER.open(req, timeout=TIMEOUT) as resp:
-                raw = resp.read()
+                raw = read_limited(resp, MAX_BODY_BYTES, deadline)
                 ctype = resp.headers.get("Content-Type", "")
         except urllib.error.HTTPError as exc:
-            detail = error_detail(exc)
+            detail = error_detail(exc, deadline)
             # Some resources are still in preview and refuse a released
             # api-version; ask again with "-preview" appended.
             if exc.code == 400 and "-preview" in detail and "api-version=" in url and "-preview" not in url:
-                return self.request(method, re.sub(r"(api-version=[0-9.]+)", r"\1-preview", url), body, content_type)
+                return self.request(method, re.sub(r"(api-version=[0-9.]+)", r"\1-preview", url),
+                                    body, content_type, deadline)
             raise Failure(http_message(exc.code, detail))
         except urllib.error.URLError as exc:
             raise Failure("Can't reach %s (%s)" % (urllib.parse.urlparse(url).netloc, exc.reason))
@@ -265,15 +331,16 @@ class Client:
         if "json" not in ctype:
             # A sign-in page instead of JSON means the token was not accepted.
             raise Failure("Token rejected: Azure DevOps answered with a sign-in page")
-        return json.loads(raw.decode("utf-8") or "{}")
+        return check_shape(json.loads(raw.decode("utf-8") or "{}"))
 
     def get(self, path, params=None, project=True, team=None):
         return self.request("GET", self.url(path, params, project, team))
 
 
-def error_detail(exc):
+def error_detail(exc, deadline=None):
     try:
-        return json.loads(exc.read().decode("utf-8")).get("message") or ""
+        raw = read_limited(exc, MAX_ERROR_BYTES, deadline or (time.monotonic() + TIMEOUT))
+        return (json.loads(raw.decode("utf-8")).get("message") or "")[:2000]
     except Exception:
         return ""
 
