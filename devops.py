@@ -12,9 +12,10 @@ Commands:
   disconnect                   forget the token and connection
   teams                        teams in every project the token can see
   set-team <team-id>           choose the team whose sprint is shown
-  board [--iteration ID] [--cached]
-                               full backlog tree (epics, features, stories,
-                               bugs and tasks) touched by a sprint
+  board [--iteration ID] [--cached] [--backlog]
+                               iteration tree (epics, features, stories,
+                               bugs and tasks under the sprint) or the full
+                               team backlog when --backlog is set
   item <id>                    one work item with everything the editor needs
   update <id>                  stdin {"rev", "changes": {...}}; saves edits
   comment <id>                 stdin {"text"}; adds a discussion comment
@@ -624,6 +625,7 @@ def cmd_status(args):
         "user": cfg.get("user") or None,
         "hasToken": has_token,
         "hideClosed": bool(cfg.get("hideClosed")),
+        "showBacklog": bool(cfg.get("showBacklog")),
     }
 
 
@@ -732,6 +734,7 @@ def iterations(client, team):
 def cmd_board(args):
     iteration_id = None
     use_cache = False
+    backlog = False
     i = 0
     while i < len(args):
         if args[i] == "--iteration" and i + 1 < len(args):
@@ -739,6 +742,8 @@ def cmd_board(args):
             i += 1
         elif args[i] == "--cached":
             use_cache = True
+        elif args[i] == "--backlog":
+            backlog = True
         i += 1
 
     cfg = load_config()
@@ -747,7 +752,8 @@ def cmd_board(args):
     team = cfg.get("team")
     if not team:
         raise Failure("Choose a team")
-    key = "board-%s-%s-%s-%s" % (cfg.get("org"), cfg.get("project"), team["id"], iteration_id or "current")
+    mode = "backlog" if backlog else ("iteration:%s" % iteration_id if iteration_id else "current")
+    key = "board-%s-%s-%s-%s" % (cfg.get("org"), cfg.get("project"), team["id"], mode)
     if use_cache:
         board = load_json(cache_path(key), None)
         return board if board else {"cacheMiss": True}
@@ -764,6 +770,9 @@ def cmd_board(args):
     if not current:
         past = [it for it in its if it["timeFrame"].lower() == "past"]
         current = past[-1] if past else its[0]
+
+    if backlog:
+        return build_backlog(client, cfg, team, its, current, key)
 
     rels = client.get("/_apis/work/teamsettings/iterations/%s/workitems" % current["id"],
                       {"api-version": "7.1-preview.1"}, team=team["id"]).get("workItemRelations", [])
@@ -800,7 +809,90 @@ def cmd_board(args):
                     next_frontier.append(pid)
         frontier = [p for p in next_frontier if p not in items]
 
-    in_sprint = set(in_sprint_ids)
+    return shape_board(client, cfg, team, its, current, items, parent_of, set(in_sprint_ids), key,
+                       extra_key=("board-%s-%s-%s-%s" % (cfg.get("org"), cfg.get("project"), team["id"], str(current["id"]))) if not iteration_id else None)
+
+
+def build_backlog(client, cfg, team, its, current, key):
+    """Pull every active Epics/Features/Stories/Bugs/Tasks in the project via
+    WIQL, then build the hierarchy from their relations. Items in the team's
+    current sprint are flagged so the QML can badge them."""
+    # Closed-state categories are derived per process, so we use a
+    # well-known taxonomy of "active" states. Anything in `Removed` state is
+    # filtered out by category after the fetch.
+    active_states = ("New", "To Do", "Active", "Resolved", "In Progress",
+                     "Proposed", "Approved", "Committed", "Done")
+    active_clause = ", ".join("'%s'" % s for s in active_states)
+    wiql = ("SELECT [System.Id] FROM WorkItems "
+            "WHERE [System.TeamProject] = @project "
+            "AND [System.WorkItemType] IN "
+            "('Epic','Feature','User Story','Bug','Task') "
+            "AND [System.State] IN (%s) "
+            "ORDER BY [Microsoft.VSTS.Common.BacklogPriority], [System.Id]"
+            % active_clause)
+    # WIQL needs the project ID in the URL (names with spaces get a generic
+    # 404) and a stable api-version (preview versions return 404 too).
+    project_id = (team.get("projectId") or "").strip()
+    org_prefix = cfg["org"] + (("/" + urllib.parse.quote(project_id, safe="")) if project_id else "")
+    wiql_url = org_prefix + "/_apis/wit/wiql?api-version=7.1&$top=5000"
+    query = client.request("POST", wiql_url, {"query": wiql})
+    ids = [r["id"] for r in query.get("workItems", []) or []]
+    items = batch_items(client, ids) if ids else {}
+
+    in_sprint_ids = set()
+    # Try the iteration endpoint for the current sprint just to know which
+    # items live there. Falls back to an empty set if the sprint is also empty.
+    if current and current.get("id"):
+        try:
+            rels = client.get(
+                "/_apis/work/teamsettings/iterations/%s/workitems" % current["id"],
+                {"api-version": "7.1-preview.1"}, team=team["id"]
+            ).get("workItemRelations", [])
+            for r in rels:
+                t = (r.get("target") or {}).get("id")
+                if t:
+                    in_sprint_ids.add(t)
+        except Failure:
+            pass
+
+    # Build parent_of from each item's relations field. WIQL doesn't include
+    # relations, but batch_items requests them via $expand=relations.
+    parent_of = {}
+    for wid, wi in items.items():
+        for rel in wi.get("relations") or []:
+            if rel.get("rel") != PARENT:
+                continue
+            pid = int(rel["url"].rstrip("/").split("/")[-1])
+            if wid not in parent_of:
+                parent_of[wid] = pid
+
+    # If a parent isn't in our fetched set, fetch it now (so an Epic above a
+    # Story still shows). Continue walking until the chain ends.
+    fetched = set(items.keys())
+    frontier = [pid for pid in parent_of.values() if pid not in fetched]
+    while frontier:
+        batch = batch_items(client, frontier)
+        items.update(batch)
+        new_parents = {}
+        for wid, wi in batch.items():
+            for rel in wi.get("relations") or []:
+                if rel.get("rel") != PARENT:
+                    continue
+                pid = int(rel["url"].rstrip("/").split("/")[-1])
+                if wid not in parent_of:
+                    parent_of[wid] = pid
+                if pid not in items and pid not in new_parents:
+                    new_parents[pid] = wid
+        fetched = set(items.keys())
+        frontier = [pid for pid in new_parents if pid not in fetched]
+
+    # Tag the current "viewing iteration" so the QML can badge the rows.
+    board = shape_board(client, cfg, team, its, current, items, parent_of, in_sprint_ids, key)
+    board["backlog"] = True
+    return board
+
+
+def shape_board(client, cfg, team, its, current, items, parent_of, in_sprint, key, extra_key=None):
     memo = {}
 
     def shape(wi):
@@ -874,8 +966,14 @@ def cmd_board(args):
         "fetchedAt": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
     }
     save_json(cache_path(key), board, 0o600)
-    if not iteration_id:
-        save_json(cache_path(key.replace("-current", "-" + str(current["id"]))), board, 0o600)
+    # Mirror under the legacy "current" key for callers that haven't been
+    # updated to the new mode tag.
+    if not key.endswith("-current") and not key.endswith("-backlog"):
+        legacy_key = key.rsplit("-", 1)[0] + "-current"
+        if not os.path.exists(cache_path(legacy_key)):
+            save_json(cache_path(legacy_key), board, 0o600)
+    if extra_key:
+        save_json(cache_path(extra_key), board, 0o600)
     return board
 
 
@@ -1076,7 +1174,7 @@ def cmd_comment(args):
     return {"ok": True, "item": cmd_item([wid])}
 
 
-PREFS = {"hideClosed"}
+PREFS = {"hideClosed", "showBacklog"}
 
 
 def cmd_pref(args):

@@ -34,6 +34,7 @@ Item {
   property string iterationId: ""
   property bool mineOnly: false
   property bool hideClosed: false
+  property bool showBacklog: false
   property int hiddenCount: 0
   property string filterText: ""
   property var expanded: ({})
@@ -208,6 +209,7 @@ Item {
     run(["status"], null, function(data) {
       status = data
       hideClosed = data.hideClosed === true
+      showBacklog = data.showBacklog === true
       if (data.error) {
         boardError = data.error
         view = "setup"
@@ -298,9 +300,16 @@ Item {
 
   // ---- board -----------------------------------------------------------------------
 
+  function boardArgs() {
+    var args = ["board"]
+    if (showBacklog) args.push("--backlog")
+    else if (iterationId) args.push("--iteration", iterationId)
+    return args
+  }
+
   function loadCachedBoard() {
     var seq = boardSeq
-    run(["board", "--cached"].concat(iterationId ? ["--iteration", iterationId] : []), null, function(data) {
+    run(boardArgs().concat(["--cached"]), null, function(data) {
       if (seq !== boardSeq || board || data.error || data.cacheMiss) return
       applyBoard(data)
     })
@@ -309,7 +318,7 @@ Item {
   function refreshBoard() {
     var seq = ++boardSeq
     boardLoading = true
-    run(["board"].concat(iterationId ? ["--iteration", iterationId] : []), null, function(data) {
+    run(boardArgs(), null, function(data) {
       if (seq !== boardSeq) return
       boardLoading = false
       if (data.error) {
@@ -362,6 +371,12 @@ Item {
   }
 
   function changeSprint(delta) {
+    if (showBacklog) {
+      // Switching sprints turns backlog mode off and lands on the chosen sprint.
+      showBacklog = false
+      refreshBoard()
+      return
+    }
     if (!board || !board.iterations || board.iterations.length === 0) return
     var its = sprintChoices()
     var idx = -1
@@ -401,6 +416,18 @@ Item {
     selectedIndex = 0
     rebuild()
     list.positionViewAtBeginning()
+  }
+
+  function setShowBacklog(value) {
+    if (showBacklog === value) return
+    showBacklog = value
+    run(["pref", "showBacklog", value ? "on" : "off"], null, null)
+    iterationId = ""
+    board = null
+    stats = { tasks: 0, done: 0, doing: 0, blocked: 0, remaining: 0, points: 0, pointsDone: 0 }
+    selectedIndex = 0
+    loadCachedBoard()
+    refreshBoard()
   }
 
   function isMine(email) {
@@ -785,12 +812,13 @@ Item {
   }
 
   function emptyText() {
-    if (!board) return boardError !== "" ? boardError : "Loading the sprint…"
+    if (!board) return boardError !== "" ? boardError : (showBacklog ? "Loading the backlog…" : "Loading the sprint…")
     if (filterText !== "") return "Nothing matches “" + filterText + "”"
-    if (mineOnly) return "Nothing assigned to you in " + board.iteration.name
-    if (boardLoading) return "Loading " + board.iteration.name + "…"
-    if (hideClosed && hiddenCount > 0) return "Everything in " + board.iteration.name + " is closed  ·  Ctrl+H shows it"
-    return "Nothing planned for " + board.iteration.name
+    if (mineOnly) return "Nothing assigned to you in " + (showBacklog ? "the team backlog" : board.iteration.name)
+    if (boardLoading) return "Loading " + (showBacklog ? "the backlog" : board.iteration.name) + "…"
+    if (hideClosed && hiddenCount > 0) return "Everything is closed  ·  Ctrl+H shows it"
+    return showBacklog ? "No active items in the team backlog"
+      : "Nothing planned for " + board.iteration.name
   }
 
   ListModel { id: rowsModel }
@@ -939,6 +967,8 @@ Item {
               root.showTeams()
             } else if (ctrl && event.key === Qt.Key_H) {
               root.setHideClosed(!root.hideClosed)
+            } else if (ctrl && event.key === Qt.Key_B) {
+              root.setShowBacklog(!root.showBacklog)
             } else if (ctrl && event.key === Qt.Key_Comma) {
               root.showSetup()
             } else if (ctrl && event.key === Qt.Key_O) {
@@ -1016,7 +1046,9 @@ Item {
                   textFormat: Text.PlainText
                   text: root.view === "teams"
                     ? "Choose your team"
-                    : (root.board ? root.board.team.name : (root.status && root.status.team ? root.status.team.name : "Sprint board"))
+                    : (root.showBacklog && root.board ? "Team backlog"
+                      : (root.board ? root.board.team.name
+                      : (root.status && root.status.team ? root.status.team.name : "Sprint board")))
                   color: root.foreground
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.heading
@@ -1034,11 +1066,15 @@ Item {
                       return ((first ? "Step 2 of 2  ·  " : "") + org + "  ·  " + root.teams.length + (root.teams.length === 1 ? " team" : " teams")).toUpperCase()
                     }
                     if (!root.board) return (root.status ? root.status.project : "").toUpperCase()
-                    var it = root.board.iteration
                     var parts = [root.board.project]
-                    if (it.start && it.finish) parts.push(root.shortDate(it.start) + " – " + root.shortDate(it.finish))
-                    var p = root.sprintProgress().text
-                    if (p) parts.push(p)
+                    if (root.showBacklog) {
+                      parts.push("FULL TEAM BACKLOG")
+                    } else {
+                      var it = root.board.iteration
+                      if (it.start && it.finish) parts.push(root.shortDate(it.start) + " – " + root.shortDate(it.finish))
+                      var p = root.sprintProgress().text
+                      if (p) parts.push(p)
+                    }
                     return parts.join("  ·  ").toUpperCase()
                   }
                   color: root.dim
@@ -1073,8 +1109,12 @@ Item {
                   elide: Text.ElideRight
                   horizontalAlignment: Text.AlignHCenter
                   textFormat: Text.PlainText
-                  text: root.board ? root.board.iteration.name
-                    + (root.board.iteration.timeFrame === "current" ? "" : root.board.iteration.timeFrame === "past" ? "  (past)" : "  (next)") : ""
+                  text: {
+                    if (!root.board) return ""
+                    if (root.showBacklog) return "Backlog"
+                    return root.board.iteration.name
+                      + (root.board.iteration.timeFrame === "current" ? "" : root.board.iteration.timeFrame === "past" ? "  (past)" : "  (next)")
+                  }
                   color: root.foreground
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.body
@@ -1136,6 +1176,20 @@ Item {
                   onClicked: root.setHideClosed(!root.hideClosed)
                 }
 
+                Button {
+                  anchors.verticalCenter: parent.verticalCenter
+                  iconText: "\uF03A"
+                  text: root.narrow ? "" : "Backlog"
+                  fontSize: Style.font.body
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  selected: root.showBacklog
+                  tooltipText: root.showBacklog
+                    ? "Back to the current sprint  (Ctrl+B)"
+                    : "Show the full team backlog: every Epic, Feature, Story and Task in the project, not just what's in this sprint  (Ctrl+B)"
+                  onClicked: root.setShowBacklog(!root.showBacklog)
+                }
+
                 PanelActionButton {
                   anchors.verticalCenter: parent.verticalCenter
                   iconText: root.glyphSync
@@ -1152,7 +1206,7 @@ Item {
               id: progress
               width: parent.width
               spacing: Style.spacing.sm
-              visible: root.view === "board" && root.board !== null && root.stats.tasks > 0
+              visible: root.view === "board" && root.board !== null && root.stats.tasks > 0 && !root.showBacklog
 
               Item {
                 width: parent.width
@@ -1360,7 +1414,7 @@ Item {
               textFormat: Text.PlainText
               text: root.view === "teams"
                 ? "Type to filter  ·  ↑↓ select  ·  Enter choose  ·  Ctrl+, connection  ·  Esc back"
-                : "↑↓ move  ·  →← expand  ·  Enter open  ·  Tab all/mine  ·  Ctrl+H hide closed  ·  Ctrl+←→ sprint  ·  Ctrl+T team  ·  Ctrl+O browser  ·  Ctrl+, connection  ·  Esc clear filter"
+                : "↑↓ move  ·  →← expand  ·  Enter open  ·  Tab all/mine  ·  Ctrl+H hide closed  ·  Ctrl+B backlog  ·  Ctrl+←→ sprint  ·  Ctrl+T team  ·  Ctrl+O browser  ·  Ctrl+, connection  ·  Esc clear filter"
               color: root.foreground
               opacity: 0.5
               font.family: root.fontFamily
