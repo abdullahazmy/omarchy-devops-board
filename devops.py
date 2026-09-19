@@ -13,7 +13,8 @@ Commands:
   teams                        teams in every project the token can see
   set-team <team-id>           choose the team whose sprint is shown
   board [--iteration ID] [--cached]
-                               stories and their tasks for a sprint
+                               full backlog tree (epics, features, stories,
+                               bugs and tasks) touched by a sprint
   item <id>                    one work item with everything the editor needs
   update <id>                  stdin {"rev", "changes": {...}}; saves edits
   comment <id>                 stdin {"text"}; adds a discussion comment
@@ -767,19 +768,39 @@ def cmd_board(args):
     rels = client.get("/_apis/work/teamsettings/iterations/%s/workitems" % current["id"],
                       {"api-version": "7.1-preview.1"}, team=team["id"]).get("workItemRelations", [])
     parent_of = {}
-    ids = []
+    seed_ids = []
+    in_sprint_ids = []
     for r in rels:
         target = (r.get("target") or {}).get("id")
         source = (r.get("source") or {}).get("id")
         if target:
-            ids.append(target)
+            seed_ids.append(target)
+            in_sprint_ids.append(target)
         if source:
-            ids.append(source)
+            seed_ids.append(source)
         if r.get("rel") == CHILD and source and target:
             parent_of[target] = source
 
-    items = batch_items(client, ids) if ids else {}
-    in_sprint = {(r.get("target") or {}).get("id") for r in rels}
+    # Walk upward. The iteration endpoint only gives direct parent edges, so
+    # we expand each ancestor's relations too until there are no more parents.
+    items = batch_items(client, seed_ids) if seed_ids else {}
+    frontier = [wid for wid in seed_ids if parent_of.get(wid) and parent_of[wid] not in items]
+    while frontier:
+        batch = batch_items(client, frontier)
+        items.update(batch)
+        next_frontier = []
+        for wid, wi in batch.items():
+            for rel in (wi.get("relations") or []):
+                if rel.get("rel") != PARENT:
+                    continue
+                pid = int(rel["url"].rstrip("/").split("/")[-1])
+                if wid not in parent_of:
+                    parent_of[wid] = pid
+                if pid not in items:
+                    next_frontier.append(pid)
+        frontier = [p for p in next_frontier if p not in items]
+
+    in_sprint = set(in_sprint_ids)
     memo = {}
 
     def shape(wi):
@@ -804,28 +825,43 @@ def cmd_board(args):
         }
 
     shaped = {wid: shape(wi) for wid, wi in items.items()}
-    stories = {}
-    loose = []
-    for wid, item in shaped.items():
-        if item["category"] == "removed":
+    # Build a tree of {item: [children]} for everything that has a parent in
+    # our set. Roots are the parents we never found a parent for.
+    children_of = {}
+    for wid in shaped:
+        if shaped[wid]["category"] == "removed":
             continue
-        parent = parent_of.get(wid)
-        if item["type"] == "Task" or parent in shaped:
-            if parent in shaped:
-                stories.setdefault(parent, dict(shaped[parent], tasks=[]))
-                stories[parent]["tasks"].append(item)
-            else:
-                loose.append(item)
-        else:
-            stories.setdefault(wid, dict(item, tasks=[]))
+        p = parent_of.get(wid)
+        if p in shaped:
+            children_of.setdefault(p, []).append(wid)
 
-    rows = sorted(stories.values(), key=by_order)
-    for s in rows:
-        s["tasks"].sort(key=by_order)
-    if loose:
+    def build(wid):
+        ordered = sorted(children_of.get(wid, []),
+                         key=lambda c: (shaped[c]["order"] is None, shaped[c]["order"] or 0, shaped[c]["id"]))
+        node = dict(shaped[wid], children=[build(c) for c in ordered])
+        # "tasks" stays as a synonym for direct children that are Tasks, so
+        # the progress bar and stats still count them without re-walking.
+        node["tasks"] = [dict(c, children=[]) for c in node["children"] if c["type"] == "Task"]
+        return node
+
+    top_ids = [wid for wid in shaped
+               if shaped[wid]["category"] != "removed" and parent_of.get(wid) not in shaped]
+    top_ids.sort(key=lambda wid: (shaped[wid]["order"] is None, shaped[wid]["order"] or 0, shaped[wid]["id"]))
+    rows = [build(wid) for wid in top_ids]
+
+    # Tasks whose parent isn't in our set (wasn't fetched, or its parent was
+    # removed) get their own bucket so they aren't dropped on the floor.
+    loose_ids = [c for parent, kids in children_of.items() for c in kids
+                 if shaped.get(c, {}).get("type") == "Task"
+                 and shaped.get(c, {}).get("category") != "removed"
+                 and parent_of.get(c) not in shaped]
+    if loose_ids:
+        loose_ids = list(dict.fromkeys(loose_ids))
+        loose_ids.sort(key=lambda wid: (shaped[wid]["order"] is None, shaped[wid]["order"] or 0, shaped[wid]["id"]))
         rows.append({"id": 0, "type": "", "title": "Tasks without a story", "state": "", "category": "",
                      "assignedTo": "", "assignedEmail": "", "points": None, "remaining": None, "tags": [],
-                     "inSprint": True, "order": None, "tasks": sorted(loose, key=by_order)})
+                     "inSprint": True, "order": None, "children": [],
+                     "tasks": [dict(shaped[wid], children=[], tasks=[]) for wid in loose_ids]})
 
     board = {
         "org": cfg["org"],
@@ -834,7 +870,7 @@ def cmd_board(args):
         "user": cfg.get("user"),
         "iteration": current,
         "iterations": its,
-        "stories": rows,
+        "rows": rows,
         "fetchedAt": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
     }
     save_json(cache_path(key), board, 0o600)
@@ -1072,6 +1108,10 @@ DEMO_TEAMS = [{"id": "demo", "name": "Phoenix Team", "project": "Demo"},
 DEMO_PEOPLE = [DEMO_ME, {"name": "Priya Shah", "email": "priya@example.com"},
                {"name": "Tom Okafor", "email": "tom@example.com"}]
 DEMO_STATES = {
+    "Epic": [{"name": "New", "category": "todo"}, {"name": "Active", "category": "doing"},
+             {"name": "Resolved", "category": "doing"}, {"name": "Closed", "category": "done"}],
+    "Feature": [{"name": "New", "category": "todo"}, {"name": "Active", "category": "doing"},
+                {"name": "Resolved", "category": "doing"}, {"name": "Closed", "category": "done"}],
     "User Story": [{"name": "New", "category": "todo"}, {"name": "Active", "category": "doing"},
                    {"name": "Resolved", "category": "doing"}, {"name": "Closed", "category": "done"}],
     "Bug": [{"name": "New", "category": "todo"}, {"name": "Active", "category": "doing"},
@@ -1085,28 +1125,51 @@ def demo_seed():
     def task(i, title, state, who, rem):
         return {"id": i, "type": "Task", "title": title, "state": state, "assignedTo": who, "remaining": rem,
                 "body": "", "comments": []}
-    return {"items": [
+    items = [
+        {"id": 4700, "type": "Epic", "title": "Customer self-service portal", "state": "Active", "assignedTo": 0,
+         "tags": "platform", "body": "", "acceptance": "", "comments": [], "children": []},
+        {"id": 4710, "type": "Feature", "title": "Account recovery", "state": "Active", "assignedTo": 0,
+         "tags": "auth", "body": "", "acceptance": "", "comments": []},
         {"id": 4812, "type": "User Story", "title": "Customers can reset their password from the sign-in page",
          "state": "Active", "assignedTo": 0, "points": 5, "tags": "auth; web",
          "body": "As a customer who forgot my password\nI want to reset it myself\nso that I don't need to call support.",
          "acceptance": "- Reset link is emailed within 1 minute\n- Link expires after 30 minutes\n- Old sessions are signed out",
          "comments": [{"author": "Priya Shah", "date": "2026-09-14T10:02:00Z", "text": "Copy for the email is in the design doc."}],
-         "tasks": [task(4820, "Design reset email template", "Closed", 1, 0),
-                   task(4821, "Token issue + expiry endpoint", "Active", 0, 4),
-                   task(4822, "Sign out other sessions on reset", "New", 2, 3),
-                   task(4823, "E2E tests for reset flow", "New", None, 5)]},
+         "children": [4820, 4821, 4822, 4823]},
+        {"id": 4720, "type": "Feature", "title": "Billing accuracy", "state": "Active", "assignedTo": 2,
+         "tags": "billing", "body": "", "acceptance": "", "comments": []},
         {"id": 4790, "type": "Bug", "title": "Invoice PDF shows the wrong VAT total for mixed-rate orders",
          "state": "New", "assignedTo": 2, "points": 3, "tags": "billing",
          "body": "1. Create an order with standard and zero-rated lines\n2. Download the invoice\n\nVAT total includes zero-rated lines.",
-         "acceptance": "", "comments": [],
-         "tasks": [task(4791, "Reproduce with fixture order", "Closed", 2, 0),
-                   task(4792, "Fix VAT grouping in invoice renderer", "Active", 2, 2)]},
+         "acceptance": "", "comments": [], "children": [4791, 4792]},
+        {"id": 4730, "type": "Feature", "title": "Manager reporting", "state": "Closed", "assignedTo": 1,
+         "tags": "", "body": "", "acceptance": "", "comments": []},
         {"id": 4755, "type": "User Story", "title": "Export sprint report to CSV", "state": "Closed", "assignedTo": 1,
-         "points": 2, "tags": "", "body": "Managers want the burndown numbers in a spreadsheet.", "acceptance": "",
-         "comments": [], "tasks": [task(4756, "CSV writer", "Closed", 1, 0), task(4757, "Download button", "Closed", 1, 0)]},
+         "points": 2, "tags": "", "body": "Managers want the burndown numbers in a spreadsheet.",
+         "acceptance": "", "comments": [], "children": [4756, 4757]},
+        {"id": 4740, "type": "Feature", "title": "Customer portal polish", "state": "New", "assignedTo": None,
+         "tags": "web; ui", "body": "", "acceptance": "", "comments": []},
         {"id": 4830, "type": "User Story", "title": "Dark mode for the customer portal", "state": "New",
-         "assignedTo": None, "points": 8, "tags": "web; ui", "body": "", "acceptance": "", "comments": [], "tasks": []},
-    ]}
+         "assignedTo": None, "points": 8, "tags": "web; ui", "body": "", "acceptance": "", "comments": []},
+        task(4820, "Design reset email template", "Closed", 1, 0),
+        task(4821, "Token issue + expiry endpoint", "Active", 0, 4),
+        task(4822, "Sign out other sessions on reset", "New", 2, 3),
+        task(4823, "E2E tests for reset flow", "New", None, 5),
+        task(4791, "Reproduce with fixture order", "Closed", 2, 0),
+        task(4792, "Fix VAT grouping in invoice renderer", "Active", 2, 2),
+        task(4756, "CSV writer", "Closed", 1, 0),
+        task(4757, "Download button", "Closed", 1, 0),
+    ]
+    # Wire up the parent links via `children`: each Feature points at its
+    # User Stories, the Epic points at all Features, and each Story points at
+    # its Tasks (which are stored separately).
+    by_id = {it["id"]: it for it in items}
+    by_id[4700]["children"] = [4710, 4720, 4730, 4740]
+    by_id[4710]["children"] = [4812]
+    by_id[4720]["children"] = [4790]
+    by_id[4730]["children"] = [4755]
+    by_id[4740]["children"] = [4830]
+    return {"items": items}
 
 
 def demo_state():
@@ -1118,13 +1181,18 @@ def demo_state():
 
 
 def demo_find(state, wid):
-    for s in state["items"]:
-        if s["id"] == wid:
-            return s, None
-        for t in s["tasks"]:
-            if t["id"] == wid:
-                return t, s
-    raise Failure("Not found")
+    items = state["items"]
+    by_id = {it["id"]: it for it in items}
+    if wid not in by_id:
+        raise Failure("Not found")
+    it = by_id[wid]
+    # Find the first item whose children reference us (its parent).
+    parent = None
+    for other in items:
+        if wid in (other.get("children") or []):
+            parent = other
+            break
+    return it, parent
 
 
 def demo_category(wtype, state):
@@ -1141,27 +1209,43 @@ def demo_board(iteration_id):
     current = next((i for i in its if i["id"] == iteration_id), its[1])
     rows = []
     if current["id"] == "s42":
-        for s in demo_state()["items"]:
-            who = DEMO_PEOPLE[s["assignedTo"]] if s["assignedTo"] is not None else {"name": "", "email": ""}
-            row = {"id": s["id"], "type": s["type"], "title": s["title"], "state": s["state"],
-                   "category": demo_category(s["type"], s["state"]), "assignedTo": who["name"],
-                   "assignedEmail": who["email"], "points": s["points"], "remaining": None,
-                   "tags": [t.strip() for t in s["tags"].split(";") if t.strip()], "inSprint": True, "tasks": []}
-            for t in s["tasks"]:
-                tw = DEMO_PEOPLE[t["assignedTo"]] if t["assignedTo"] is not None else {"name": "", "email": ""}
-                row["tasks"].append({"id": t["id"], "type": "Task", "title": t["title"], "state": t["state"],
-                                     "category": demo_category("Task", t["state"]), "assignedTo": tw["name"],
-                                     "assignedEmail": tw["email"], "points": None, "remaining": t["remaining"],
-                                     "tags": [], "inSprint": True})
-            rows.append(row)
+        items = demo_state()["items"]
+        by_id = {it["id"]: it for it in items}
+
+        # Roots: anything not referenced as a child elsewhere.
+        referenced = {kid for it in items for kid in it.get("children", [])}
+        roots = [it for it in items if it["id"] not in referenced]
+
+        def shape(it, in_sprint):
+            who = DEMO_PEOPLE[it["assignedTo"]] if it["assignedTo"] is not None else {"name": "", "email": ""}
+            kids = [shape(by_id[kid], in_sprint) for kid in it.get("children", [])
+                    if kid in by_id and by_id[kid]["type"] != "Task"]
+            tasks = [task_shape(by_id[t], in_sprint) for t in it.get("children", [])
+                     if t in by_id and by_id[t]["type"] == "Task"]
+            return {"id": it["id"], "type": it["type"], "title": it["title"], "state": it["state"],
+                    "category": demo_category(it["type"], it["state"]), "assignedTo": who["name"],
+                    "assignedEmail": who["email"], "points": it.get("points"),
+                    "remaining": None,
+                    "tags": [t.strip() for t in (it.get("tags") or "").split(";") if t.strip()],
+                    "inSprint": in_sprint, "children": kids, "tasks": tasks}
+
+        def task_shape(t, in_sprint):
+            tw = DEMO_PEOPLE[t["assignedTo"]] if t["assignedTo"] is not None else {"name": "", "email": ""}
+            return {"id": t["id"], "type": "Task", "title": t["title"], "state": t["state"],
+                    "category": demo_category("Task", t["state"]), "assignedTo": tw["name"],
+                    "assignedEmail": tw["email"], "points": None, "remaining": t.get("remaining"),
+                    "tags": [], "inSprint": in_sprint, "children": [], "tasks": []}
+
+        rows = [shape(r, True) for r in roots]
     return {"org": "https://dev.azure.com/demo", "project": "Demo", "team": DEMO_TEAMS[0], "user": DEMO_ME,
-            "iteration": current, "iterations": its, "stories": rows, "demo": True,
+            "iteration": current, "iterations": its, "rows": rows, "demo": True,
             "fetchedAt": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
 
 
 def demo_item(wid):
     state = demo_state()
     it, parent = demo_find(state, wid)
+    by_id = {x["id"]: x for x in state["items"]}
     who = DEMO_PEOPLE[it["assignedTo"]] if it["assignedTo"] is not None else {"name": "", "email": ""}
     is_task = it["type"] == "Task"
 
@@ -1183,7 +1267,8 @@ def demo_item(wid):
         "points": it.get("points"), "hasRemaining": is_task, "remaining": it.get("remaining"),
         "createdBy": "Priya Shah", "createdDate": "2026-09-01T09:00:00Z", "changedBy": DEMO_ME["name"],
         "changedDate": "2026-09-15T16:30:00Z", "parent": brief(parent) if parent else None,
-        "children": [brief(t) for t in it.get("tasks", [])], "comments": it.get("comments", []),
+        "children": [brief(by_id[c]) for c in (it.get("children") or []) if c in by_id],
+        "comments": it.get("comments", []),
         "url": "https://dev.azure.com/demo/Demo/_workitems/edit/%d" % wid,
     }
 

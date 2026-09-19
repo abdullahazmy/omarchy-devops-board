@@ -86,6 +86,8 @@ Item {
 
   // Nerd Font glyphs.
   readonly property string glyphBoard: "\uF0AE"
+  readonly property string glyphEpic: "\uF073"
+  readonly property string glyphFeature: "\uF0E8"
   readonly property string glyphStory: "\uF02D"
   readonly property string glyphBug: "\uF188"
   readonly property string glyphTodo: "\uF10C"
@@ -324,29 +326,35 @@ Item {
   function applyBoard(data) {
     board = data
     var s = { tasks: 0, done: 0, doing: 0, blocked: 0, remaining: 0, points: 0, pointsDone: 0 }
-    var stories = data.stories || []
+    var rows = data.rows || []
     var nextExpanded = Object.assign({}, expanded)
-    for (var i = 0; i < stories.length; i++) {
-      var story = stories[i]
-      if (story.points) {
-        s.points += story.points
-        if (story.category === "done") s.pointsDone += story.points
-      }
-      var open = 0
-      for (var j = 0; j < story.tasks.length; j++) {
-        var t = story.tasks[j]
+    // Walk the whole tree so stats reflect everything: Epics > Features >
+    // Stories/Bugs > Tasks. "tasks" counts the leaves; "points" rolls up any
+    // node that has points, including Features and parent items.
+    function visit(node) {
+      var kids = node.children || node.tasks || []
+      if (node.type === "Task") {
         s.tasks++
-        if (t.category === "done") s.done++
+        if (node.category === "done") s.done++
         else {
-          open++
-          if (t.category === "doing") s.doing++
-          if (stateKind(t.state, t.category) === "blocked") s.blocked++
-          s.remaining += Number(t.remaining) || 0
+          if (node.category === "doing") s.doing++
+          if (stateKind(node.state, node.category) === "blocked") s.blocked++
+          s.remaining += Number(node.remaining) || 0
         }
+      } else if (node.points) {
+        s.points += node.points
+        if (node.category === "done") s.pointsDone += node.points
       }
-      // Stories start expanded while they still have open tasks.
-      if (nextExpanded[story.id] === undefined) nextExpanded[story.id] = open > 0
+      var openLeaf = false
+      for (var i = 0; i < kids.length; i++) {
+        visit(kids[i])
+        if (kids[i].type === "Task" && kids[i].category !== "done") openLeaf = true
+      }
+      if (kids.length > 0 && nextExpanded[node.id] === undefined) {
+        nextExpanded[node.id] = openLeaf || (node.type !== "Task")
+      }
     }
+    for (var i = 0; i < rows.length; i++) visit(rows[i])
     s.remaining = Math.round(s.remaining * 10) / 10
     stats = s
     expanded = nextExpanded
@@ -361,13 +369,13 @@ Item {
     var next = Math.max(0, Math.min(its.length - 1, idx + delta))
     if (next === idx) return
     iterationId = its[next].id
-    board = Object.assign({}, board, { iteration: its[next], stories: [] })
+    board = Object.assign({}, board, { iteration: its[next], rows: [] })
     stats = { tasks: 0, done: 0, doing: 0, blocked: 0, remaining: 0, points: 0, pointsDone: 0 }
     selectedIndex = 0
     rebuild()
     var seq = boardSeq
     run(["board", "--cached", "--iteration", iterationId], null, function(data) {
-      if (seq === boardSeq - 1 && !data.error && !data.cacheMiss && board.stories.length === 0) applyBoard(data)
+      if (seq === boardSeq - 1 && !data.error && !data.cacheMiss && board.rows.length === 0) applyBoard(data)
     })
     refreshBoard()
   }
@@ -387,7 +395,7 @@ Item {
     if (value && board && board.iteration && board.iteration.timeFrame === "past") {
       // Back to the current sprint.
       iterationId = ""
-      board = Object.assign({}, board, { stories: [] })
+      board = Object.assign({}, board, { rows: [] })
       refreshBoard()
     }
     selectedIndex = 0
@@ -415,11 +423,12 @@ Item {
     return (parts[0].charAt(0) + parts[parts.length - 1].charAt(0)).toUpperCase()
   }
 
-  function rowFor(item, kind, extra) {
+  function rowFor(item, level, extra) {
     var r = {
-      kind: kind,
+      kind: item.type === "Task" ? "task" : "node",
       itemId: Number(item.id) || 0,
       type: String(item.type || ""),
+      level: level,
       title: String(item.title || ""),
       state: String(item.state || ""),
       category: String(item.category || ""),
@@ -431,9 +440,9 @@ Item {
       taskTotal: 0,
       taskDone: 0,
       taskDoing: 0,
-      hasTasks: false,
+      hasChildren: false,
       isExpanded: false,
-      lastTask: false,
+      lastChild: false,
       outside: item.inSprint === false
     }
     for (var k in extra) r[k] = extra[k]
@@ -446,48 +455,122 @@ Item {
     rowsModel.clear()
     if (!board) return
     var needle = filterText.toLowerCase().trim()
-    var stories = board.stories || []
+    var roots = board.rows || []
     var restore = -1
     var hidden = 0
-    for (var i = 0; i < stories.length; i++) {
-      var story = stories[i]
-      var storyMine = isMine(story.assignedEmail)
-      var tasks = story.tasks.filter(function(t) {
-        if (hideClosed && t.category === "done") {
-          hidden++
-          return false
+
+    // Counters over the whole subtree, used both for the visible progress bar
+    // on a parent row and for the "hide closed" rule. A node is "open" if any
+    // descendant Task isn't done.
+    function leafCounts(node) {
+      var kids = (node.children && node.children.length > 0) ? node.children
+        : (node.tasks && node.tasks.length > 0) ? node.tasks
+        : []
+      var total = 0, done = 0, doing = 0, leafOpen = false, hasTasks = false
+      for (var i = 0; i < kids.length; i++) {
+        var k = kids[i]
+        if (k.type === "Task") {
+          hasTasks = true
+          total++
+          if (k.category === "done") done++
+          else {
+            leafOpen = true
+            if (k.category === "doing") doing++
+          }
+        } else {
+          var sub = leafCounts(k)
+          total += sub.total
+          done += sub.done
+          doing += sub.doing
+          if (sub.leafOpen) leafOpen = true
+          if (sub.hasTasks) hasTasks = true
         }
-        return (!mineOnly || storyMine || isMine(t.assignedEmail))
+      }
+      return { total: total, done: done, doing: doing, leafOpen: leafOpen, hasTasks: hasTasks }
+    }
+
+    function passesFilter(node) {
+      if (needle === "" && !mineOnly) return true
+      if (matches(node, needle)) return true
+      var kids = (node.children && node.children.length > 0) ? node.children
+        : (node.tasks && node.tasks.length > 0) ? node.tasks
+        : []
+      for (var i = 0; i < kids.length; i++) if (passesFilter(kids[i])) return true
+      return false
+    }
+
+    function mineMatch(node) {
+      if (!mineOnly) return true
+      if (isMine(node.assignedEmail)) return true
+      var kids = (node.children && node.children.length > 0) ? node.children
+        : (node.tasks && node.tasks.length > 0) ? node.tasks
+        : []
+      for (var i = 0; i < kids.length; i++) if (mineMatch(kids[i])) return true
+      return false
+    }
+
+    function appendNode(node, level) {
+      var counts = leafCounts(node)
+      var kids = (node.children && node.children.length > 0) ? node.children
+        : (node.tasks && node.tasks.length > 0) ? node.tasks
+        : []
+      var openExpanded = needle !== "" || mineOnly || expanded[node.id] === true
+      var isOpen = openExpanded && (kids.length > 0)
+
+      var row = rowFor(node, level, {
+        taskTotal: counts.total,
+        taskDone: counts.done,
+        taskDoing: counts.doing,
+        hasChildren: kids.length > 0,
+        isExpanded: isOpen
       })
-      var openTasks = story.tasks.some(function(t) { return t.category !== "done" })
-      if (hideClosed && story.category === "done" && !openTasks) {
+      if (row.kind + ":" + row.itemId === keepKey) restore = rowsModel.count
+      rowsModel.append(row)
+
+      if (!isOpen) return
+      var visible = []
+      for (var i = 0; i < kids.length; i++) {
+        var k = kids[i]
+        if (k.type === "Task") {
+          if (hideClosed && k.category === "done") {
+            hidden++
+            continue
+          }
+          visible.push(k)
+        } else {
+          if (hideClosed && k.category === "done" && !(leafCounts(k).leafOpen)) {
+            hidden++
+            continue
+          }
+          if (!passesFilter(k)) continue
+          if (!mineMatch(k)) continue
+          visible.push(k)
+        }
+      }
+      for (var j = 0; j < visible.length; j++) {
+        var child = visible[j]
+        if (child.type === "Task") {
+          var trow = rowFor(child, level + 1, { lastChild: j === visible.length - 1 })
+          if (trow.kind + ":" + trow.itemId === keepKey) restore = rowsModel.count
+          rowsModel.append(trow)
+        } else {
+          appendNode(child, level + 1)
+        }
+      }
+    }
+
+    for (var r = 0; r < roots.length; r++) {
+      var root = roots[r]
+      if (!passesFilter(root)) continue
+      if (!mineMatch(root)) continue
+      if (hideClosed && root.category === "done" && !(leafCounts(root).leafOpen)
+          && root.id !== 0 && root.type !== "Task") {
         hidden++
         continue
       }
-      var storyHit = matches(story, needle)
-      if (needle !== "" && !storyHit) tasks = tasks.filter(function(t) { return matches(t, needle) })
-      if (mineOnly && !storyMine && tasks.length === 0) continue
-      if (needle !== "" && !storyHit && tasks.length === 0) continue
-
-      var done = 0, doing = 0
-      for (var j = 0; j < story.tasks.length; j++) {
-        if (story.tasks[j].category === "done") done++
-        else if (story.tasks[j].category === "doing") doing++
-      }
-      var isOpen = needle !== "" || mineOnly || expanded[story.id] === true
-      var srow = rowFor(story, "story", {
-        taskTotal: story.tasks.length, taskDone: done, taskDoing: doing,
-        hasTasks: story.tasks.length > 0, isExpanded: isOpen && tasks.length > 0
-      })
-      if (srow.kind + ":" + srow.itemId === keepKey) restore = rowsModel.count
-      rowsModel.append(srow)
-      if (!isOpen) continue
-      for (var k = 0; k < tasks.length; k++) {
-        var trow = rowFor(tasks[k], "task", { lastTask: k === tasks.length - 1 })
-        if (trow.kind + ":" + trow.itemId === keepKey) restore = rowsModel.count
-        rowsModel.append(trow)
-      }
+      appendNode(root, 0)
     }
+
     hiddenCount = hidden
     if (restore >= 0) selectedIndex = restore
     selectedIndex = Math.max(0, Math.min(rowsModel.count - 1, selectedIndex))
@@ -507,7 +590,7 @@ Item {
   }
 
   function storyIndexFor(index) {
-    for (var i = index; i >= 0; i--) if (rowsModel.get(i).kind === "story") return i
+    for (var i = index; i >= 0; i--) if (rowsModel.get(i).kind === "node") return i
     return -1
   }
 
@@ -519,7 +602,7 @@ Item {
       index = storyIndexFor(index)
       row = rowsModel.get(index)
     }
-    if (!row.hasTasks || filterText !== "" || mineOnly) {
+    if (!row.hasChildren || filterText !== "" || mineOnly) {
       selectedIndex = index
       return
     }
@@ -567,22 +650,24 @@ Item {
   // A saved item changes the board immediately; the full refresh follows.
   function itemSaved(item) {
     if (!board || !item) return
-    var stories = board.stories || []
+    var roots = board.rows || []
     var hit = false
-    for (var i = 0; i < stories.length; i++) {
-      var list = [stories[i]].concat(stories[i].tasks)
-      for (var j = 0; j < list.length; j++) {
-        if (list[j].id !== item.id) continue
-        list[j].title = item.title
-        list[j].state = item.state
-        list[j].category = item.category
-        list[j].assignedTo = item.assignedTo ? item.assignedTo.name : ""
-        list[j].assignedEmail = item.assignedTo ? item.assignedTo.email : ""
-        list[j].points = item.points
-        list[j].remaining = item.remaining
+    function patch(node) {
+      if (node.id === item.id) {
+        node.title = item.title
+        node.state = item.state
+        node.category = item.category
+        node.assignedTo = item.assignedTo ? item.assignedTo.name : ""
+        node.assignedEmail = item.assignedTo ? item.assignedTo.email : ""
+        node.points = item.points
+        node.remaining = item.remaining
         hit = true
+        return
       }
+      var kids = node.children || node.tasks || []
+      for (var i = 0; i < kids.length; i++) patch(kids[i])
     }
+    for (var r = 0; r < roots.length; r++) patch(roots[r])
     if (hit) applyBoard(board)
     refreshBoard()
   }
@@ -705,7 +790,7 @@ Item {
     if (mineOnly) return "Nothing assigned to you in " + board.iteration.name
     if (boardLoading) return "Loading " + board.iteration.name + "…"
     if (hideClosed && hiddenCount > 0) return "Everything in " + board.iteration.name + " is closed  ·  Ctrl+H shows it"
-    return "No stories planned for " + board.iteration.name
+    return "Nothing planned for " + board.iteration.name
   }
 
   ListModel { id: rowsModel }
@@ -1289,8 +1374,9 @@ Item {
     }
   }
 
-  // One story or task. Stories carry a chevron, task count bar and points;
-  // tasks are indented under their story with remaining hours.
+  // One node or task in the hierarchy. Nodes carry a chevron, a roll-up
+  // progress bar, and (for Stories/Bugs) their points; tasks are indented
+  // and show remaining hours.
   component BoardRow: CursorSurface {
     id: row
 
@@ -1298,6 +1384,7 @@ Item {
     required property string kind
     required property int itemId
     required property string type
+    required property int level
     required property string title
     required property string state
     required property string category
@@ -1309,13 +1396,17 @@ Item {
     required property int taskTotal
     required property int taskDone
     required property int taskDoing
-    required property bool hasTasks
+    required property bool hasChildren
     required property bool isExpanded
     required property bool outside
 
-    readonly property bool isStory: kind === "story"
+    readonly property bool isTask: kind === "task"
+    readonly property bool isNode: kind === "node"
+    readonly property bool isEpic: type === "Epic"
+    readonly property bool isFeature: type === "Feature"
+    readonly property bool isStory: type === "User Story" || type === "Bug"
     readonly property bool isDone: category === "done"
-    readonly property int indent: isStory ? 0 : Style.space(34)
+    readonly property int indent: isTask ? level * Style.space(22) : (level * Style.space(22))
 
     width: list.width
     height: root.rowHeight
@@ -1330,12 +1421,12 @@ Item {
       onClicked: if (row.itemId > 0) root.openItem(row.itemId)
     }
 
-    // Chevron (stories with tasks).
+    // Chevron (nodes that have children).
     Text {
       id: chevron
-      visible: row.isStory && row.hasTasks
+      visible: row.isNode && row.hasChildren
       anchors.left: parent.left
-      anchors.leftMargin: Style.spacing.md
+      anchors.leftMargin: Style.spacing.md + row.indent
       anchors.verticalCenter: parent.verticalCenter
       width: Style.space(14)
       horizontalAlignment: Text.AlignHCenter
@@ -1353,10 +1444,10 @@ Item {
       }
     }
 
-    // Tree line joining tasks to their story.
+    // Tree line joining non-root rows to their parent.
     Rectangle {
-      visible: !row.isStory
-      x: Style.spacing.md + Style.space(7)
+      visible: row.level > 0
+      x: Style.spacing.md + Style.space(7) + (row.level - 1) * Style.space(22)
       width: Math.max(1, Style.space(1))
       height: row.height + Style.spacing.xxs
       y: -Style.spacing.xxs
@@ -1366,15 +1457,23 @@ Item {
     Text {
       id: glyph
       anchors.left: parent.left
-      anchors.leftMargin: Style.spacing.md + Style.space(22) + row.indent - (row.isStory ? 0 : Style.space(12))
+      anchors.leftMargin: Style.spacing.md + Style.space(22) + row.indent
       anchors.verticalCenter: parent.verticalCenter
       textFormat: Text.PlainText
-      text: row.itemId === 0 ? root.glyphClosed
-        : (row.isStory && row.type === "Bug" ? root.glyphBug : root.stateGlyph(row.category, row.state))
+      text: {
+        if (row.itemId === 0) return root.glyphClosed
+        if (row.isEpic) return root.glyphEpic
+        if (row.isFeature) return root.glyphFeature
+        if (row.isTask) return root.stateGlyph(row.category, row.state)
+        if (row.type === "Bug") return root.glyphBug
+        return root.glyphStory
+      }
       color: row.itemId === 0 ? root.dim : root.stateColor(row.state, row.category, root.foreground)
       opacity: row.isDone ? 0.5 : 1
       font.family: root.fontFamily
-      font.pixelSize: row.isStory ? Style.font.title : Style.font.body
+      font.pixelSize: row.isEpic ? Style.font.heading
+        : row.isFeature || row.isStory ? Style.font.title
+        : Style.font.body
     }
 
     Text {
@@ -1409,8 +1508,10 @@ Item {
         color: root.foreground
         opacity: row.isDone ? 0.5 : 1
         font.family: root.fontFamily
-        font.pixelSize: row.isStory ? Style.font.subtitle : Style.font.body
-        font.bold: row.isStory
+        font.pixelSize: row.isEpic ? Style.font.title
+          : row.isFeature || row.isStory ? Style.font.subtitle
+          : Style.font.body
+        font.bold: row.isEpic || row.isFeature || row.isStory
         font.strikeout: false
         elide: Text.ElideRight
       }
@@ -1436,14 +1537,14 @@ Item {
       anchors.verticalCenter: parent.verticalCenter
       spacing: Style.spacing.xl
 
-      // Task completion for a story: a small bar plus done/total.
+      // Roll-up progress bar for any node with descendant tasks.
       Item {
         anchors.verticalCenter: parent.verticalCenter
         width: root.compact ? Style.space(40) : Style.space(96)
         height: countLabel.implicitHeight
 
         Item {
-          visible: !root.compact && row.isStory && row.taskTotal > 0
+          visible: !root.compact && row.isNode && row.taskTotal > 0
           anchors.left: parent.left
           anchors.right: countLabel.left
           anchors.rightMargin: Style.spacing.md
@@ -1474,10 +1575,10 @@ Item {
           anchors.right: parent.right
           anchors.verticalCenter: parent.verticalCenter
           textFormat: Text.PlainText
-          text: row.isStory
-            ? (row.taskTotal > 0 ? row.taskDone + "/" + row.taskTotal : "")
-            : (row.remaining > 0 ? root.number(row.remaining) + "h" : "")
-          color: row.isStory ? root.dim : root.foreground
+          text: row.isTask
+            ? (row.remaining > 0 ? root.number(row.remaining) + "h" : "")
+            : (row.taskTotal > 0 ? row.taskDone + "/" + row.taskTotal : "")
+          color: row.isTask ? root.dim : root.dim
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
         }
@@ -1485,7 +1586,7 @@ Item {
 
       Text {
         anchors.verticalCenter: parent.verticalCenter
-        visible: !root.narrow
+        visible: !root.narrow && row.isStory
         width: Style.space(44)
         horizontalAlignment: Text.AlignRight
         textFormat: Text.PlainText
